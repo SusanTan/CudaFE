@@ -25,6 +25,8 @@ struct MergeKernel : public FunctionPass {
         Function* calledFunc = CI->getCalledFunction();
         if(calledFunc->getName() == "cudaConfigureCall"){
           errs() << "CudaFE: found cudaConfigureCall\n";
+
+          //remove control flow caused by configuration failure
           BranchInst *CF2Remove = dyn_cast<BranchInst>(CI->getParent()->getTerminator());
           CmpInst *cmp = dyn_cast<CmpInst>(CF2Remove->getCondition());
           if(cmp){
@@ -46,6 +48,54 @@ struct MergeKernel : public FunctionPass {
               }
             }
           }
+
+          //find gridDim
+          LoadInst *gridDimArg = dyn_cast<LoadInst>(CI->getArgOperand(0));
+          assert(gridDimArg && "mergeKernel: gridDimArg is not a load inst\n");
+          GetElementPtrInst *gridDimGep = dyn_cast<GetElementPtrInst>(gridDimArg->getOperand(0));
+          assert(gridDimGep && "mergeKernel: gridDimGep is not a gep inst\n");
+          AllocaInst *gridDimAllocaCoerce = dyn_cast<AllocaInst>(gridDimGep->getOperand(0));
+          assert(gridDimAllocaCoerce && "mergeKernel: gridDimAllocaCoerce is not an alloca inst\n");
+          errs() << "SUSAN: gridDimAllocaCoerce: " << *gridDimAllocaCoerce << "\n";
+          BitCastInst *gridDimBitCast = nullptr;
+          for (inst_iterator I = inst_begin(&F), E = inst_end(&F); I != E; ++I) {
+            BitCastInst *bitcast = dyn_cast<BitCastInst>(&*I);
+            if(!bitcast) continue;
+            if(bitcast->getOperand(0) != gridDimAllocaCoerce) continue;
+            gridDimBitCast = bitcast;
+            break;
+          }
+          assert(gridDimBitCast && "mergeKernel: gridDimBitCast is not a bit cast inst\n");
+          errs() << "SUSAN: gridDimBitCast: " << *gridDimBitCast << "\n";
+          BitCastInst *gridDimBitCastStore = nullptr;
+          for (inst_iterator I = inst_begin(&F), E = inst_end(&F); I != E; ++I) {
+            CallInst *CI = dyn_cast<CallInst>(&*I);
+            if(!CI) continue;
+            if(CI->getCalledFunction()->getName() != "llvm.memcpy.p0i8.p0i8.i64") continue;
+            if(CI->getArgOperand(0) != gridDimBitCast) continue;
+            BitCastInst *bitcast = dyn_cast<BitCastInst>(CI->getArgOperand(1));
+            gridDimBitCastStore = bitcast;
+            break;
+          }
+          assert(gridDimBitCastStore && "mergeKernel: gridDimBitCastStore is not a bit cast store inst \n");
+          AllocaInst *gridDimAlloca = dyn_cast<AllocaInst>(gridDimBitCastStore->getOperand(0));
+          assert(gridDimAlloca && "mergeKernel: gridDimAlloca is not an alloca inst \n");
+          Value *gridDim = nullptr;
+          for (inst_iterator I = inst_begin(&F), E = inst_end(&F); I != E; ++I) {
+            CallInst *CI = dyn_cast<CallInst>(&*I);
+            if(!CI) continue;
+            if(CI->getCalledFunction()->getName() != "_ZN4dim3C2Ejjj") continue;
+            if(CI->getArgOperand(0) != gridDimAlloca) continue;
+            Value *dim1 = CI->getArgOperand(1);
+            Value *dim2 = CI->getArgOperand(2);
+            Value *dim3 = CI->getArgOperand(3);
+            errs() << "mergeKernel: grid Dim 1: " << *dim1 <<"\n";
+            break;
+          }
+
+
+
+
           insts2Remove.push_back(CI);
         }
         else if(calledFunc->getName() == "_ZL10cudaMallocIdE9cudaErrorPPT_m"){
@@ -86,6 +136,9 @@ struct MergeKernel : public FunctionPass {
 
           auto MemCpyFunc = F.getParent()->getOrInsertFunction("llvm.memcpy.p0i8.p0i8.i64", memcpyFuncTy);
           CallInst *NewCI = CallInst::Create(MemCpyFunc, args, "", CI);
+          insts2Remove.push_back(CI);
+        }
+        else if(calledFunc->getName() == "cudaDeviceSynchronize"){
           insts2Remove.push_back(CI);
         }
       }

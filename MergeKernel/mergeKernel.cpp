@@ -12,6 +12,10 @@
 
 #include <set>
 #include <stack>
+#include <map>
+#include "IDMap.h"
+#include "llvm/Transforms/Utils/ValueMapper.h"
+#include "llvm/Transforms/Utils/Cloning.h"
 
 using namespace llvm;
 
@@ -19,9 +23,10 @@ namespace {
 struct MergeKernel : public FunctionPass {
   static char ID;
   std::vector<Value*> loopDims;
+  std::map<int, Value*> loopDimMap;
   MergeKernel() : FunctionPass(ID) {}
 
-  void findThreadDim(Function &F, LoadInst *DimArg){
+  void findThreadDim(Function &F, LoadInst *DimArg, bool blockOrGrid){
     //LoadInst *DimArg = dyn_cast<LoadInst>(CI->getArgOperand(2));
     assert(DimArg && "mergeKernel: DimArg is not a load inst\n");
     GetElementPtrInst *ArgGep = dyn_cast<GetElementPtrInst>(DimArg->getOperand(0));
@@ -54,16 +59,23 @@ struct MergeKernel : public FunctionPass {
     for (inst_iterator I = inst_begin(&F), E = inst_end(&F); I != E; ++I) {
       CallInst *CI = dyn_cast<CallInst>(&*I);
       if(!CI) continue;
-      if(CI->getCalledFunction()->getName() != "_ZN4dim3C2Ejjj") continue;
+      if(!CI->getCalledFunction()->getName().contains("_ZN4dim3C2Ejjj")) continue;
       if(CI->getArgOperand(0) != AggAlloca) continue;
 
       for(int i=1; i<=3; ++i){
         Value *dim = CI->getArgOperand(i);
         if(ConstantInt *dimConst = dyn_cast<ConstantInt>(dim))
-          if(dimConst->getZExtValue() == 1)
+          if(dimConst->getZExtValue() == 1){
+            blockOrGrid ? loopDimMap[i] = dim : loopDimMap[i+3] = dim;
             continue;
+          }
         loopDims.push_back(dim);
+        blockOrGrid ? loopDimMap[i] = dim : loopDimMap[i+3] = dim;
         errs() << "mergeKernel: Dim " << i << " : " << *dim <<"\n";
+      }
+
+      for(auto [idx, dim] : loopDimMap){
+        errs() << "mergeKernel: " << idx << " : " << *dim << "\n";
       }
       foundDim = true;
       break;
@@ -93,7 +105,7 @@ struct MergeKernel : public FunctionPass {
       for (inst_iterator I = inst_begin(&F), E = inst_end(&F); I != E; ++I) {
         CallInst *CI = dyn_cast<CallInst>(&*I);
         if(!CI) continue;
-        if(CI->getCalledFunction()->getName() != "_ZN4dim3C2Ejjj") continue;
+        if(!CI->getCalledFunction()->getName().contains("_ZN4dim3C2Ejjj")) continue;
         if(CI->getArgOperand(0) != DimAlloca) continue;
         for(int i=1; i<=3; ++i){
           Value *dim = CI->getArgOperand(i);
@@ -101,7 +113,7 @@ struct MergeKernel : public FunctionPass {
             if(dimConst->getZExtValue() == 1)
               continue;
           loopDims.push_back(dim);
-          errs() << "mergeKernel: Dim " << i << " : " << *dim <<"\n";
+          blockOrGrid ? loopDimMap[i] = dim : loopDimMap[i+3] = dim;
         }
         foundDim = true;
         break;
@@ -111,16 +123,17 @@ struct MergeKernel : public FunctionPass {
 
   bool runOnFunction(Function &F) override {
     loopDims.clear();
-    std::vector<Instruction*> insts2Remove;
     BasicBlock *kernelBB = nullptr;
+    std::vector<Instruction*> insts2Remove;
     for (inst_iterator I = inst_begin(&F), E = inst_end(&F); I != E; ++I) {
       if(CallInst *CI = dyn_cast<CallInst>(&*I)){
         Function* calledFunc = CI->getCalledFunction();
-        if(calledFunc->getName() == "_ZL10cudaMallocIdE9cudaErrorPPT_m" ||
-           calledFunc->getName() == "_ZN4dim3C2Ejjj"){
+        if(calledFunc->getName().contains("_ZL10cudaMallocIdE9cudaErrorPPT_m") ||
+           calledFunc->getName().contains("_ZN4dim3C2Ejjj")){
           insts2Remove.push_back(CI);
         }
-        else if(calledFunc->getName() == "cudaConfigureCall"){
+        else if(calledFunc->getName().contains("cudaConfigureCall")){
+          CallInst *kernelCall = nullptr;
           errs() << "CudaFE: found cudaConfigureCall\n";
 
           //remove control flow caused by configuration failure
@@ -141,19 +154,217 @@ struct MergeKernel : public FunctionPass {
               if(ConfigureThenBranchPattern){
                 CF2Remove->setCondition(ConstantInt::get(Type::getInt1Ty(CF2Remove->getContext()), 0));
                 kernelBB = CF2Remove->getSuccessor(1);
+
+                //write metadata to the function call
+                for(auto &I : *kernelBB){
+                  if(CallInst *CI = dyn_cast<CallInst>(&I)){
+                    Function *calledFunc = CI->getCalledFunction();
+                    for (inst_iterator I = inst_begin(calledFunc), E = inst_end(calledFunc); I != E; ++I) {
+                      if(CallInst *ci = dyn_cast<CallInst>(&*I)){
+                        Function *calledF = ci->getCalledFunction();
+                        if(calledF->getName().contains("cudaLaunch")){
+                          kernelCall = CI;
+                          break;
+                        }
+                      }
+                    }
+                  }
+
+                  if(kernelCall)
+                    break;
+                }
+
+                assert(kernelCall && "mergeKernel: din't find kernel call!\n");
+                errs() << "mergeKernel: kernel call: " << *kernelCall << "\n";
+
+
                 insts2Remove.push_back(cmp);
               }
             }
           }
 
           errs() << "MergeKernel: blocks per grid:\n";
-          findThreadDim(F, dyn_cast<LoadInst>(CI->getArgOperand(0)));
+          findThreadDim(F, dyn_cast<LoadInst>(CI->getArgOperand(0)), false);
           errs() << "MergeKernel: threads per block:\n";
-          findThreadDim(F, dyn_cast<LoadInst>(CI->getArgOperand(2)));
+          findThreadDim(F, dyn_cast<LoadInst>(CI->getArgOperand(2)), true);
+
+          //find host kernel function and actual kernel name
+          Module *M = F.getParent();
+          StringRef host_kernelName = kernelCall->getCalledFunction()->getName();
+          auto namePair = host_kernelName.rsplit("_CudaFE_");
+          StringRef kernelName = namePair.second;
+          errs() << "mergeKernel: found kernelName: " << kernelName << "\n";
+
+          //Find device kernel function
+          Function *deviceKernel = nullptr;
+          for (Module::iterator FI = M->begin(), FE = M->end(); FI != FE; ++FI) {
+            Function *F = &*FI;
+            auto funcName = F->getName();
+            if(funcName.contains(kernelName) &&
+               funcName != host_kernelName ){
+              deviceKernel = F;
+              break;
+            }
+          }
+          errs() << "MergeKernel: found deviceKernel: " << deviceKernel->getName() << "\n";
+
+
+
+          //create a new function for kernel
+          Type* i32Ty = Type::getInt32Ty(deviceKernel->getContext());
+          std::vector<Type*>argTys;
+          for(auto arg = deviceKernel->arg_begin(); arg != deviceKernel->arg_end(); ++arg)
+            argTys.push_back(arg->getType());
+          for(int i=0; i<12; i++)
+            argTys.push_back(i32Ty);
+          FunctionType* funcTy = FunctionType::get(
+                deviceKernel->getReturnType(), //return type
+                ArrayRef<Type*>(argTys), //arg types;
+                false
+              );
+          Function *newFunc = Function::Create(
+                funcTy,
+                deviceKernel->getLinkage(),
+                deviceKernel->getName(),
+                *M
+              );
+          errs() << "MergeKernel: created new Function: " << *newFunc << "\n";
+
+          //copy old kernel over to the new
+          ValueToValueMapTy VMap;
+          auto NewFArgIt = newFunc->arg_begin();
+          for (auto &Arg: deviceKernel->args()) {
+            auto ArgName = Arg.getName();
+            NewFArgIt->setName(ArgName);
+            VMap[&Arg] = &(*NewFArgIt++);
+          }
+          SmallVector<ReturnInst*, 8> Returns;
+          llvm::CloneFunctionInto(newFunc, deviceKernel, VMap, false, Returns);
+          errs() << *newFunc << "\n";
+
+          ////remove the use of the argument in device kernel
+          //std::vector<Instruction*> uses2remove;
+          //for(auto arg = deviceKernel->arg_begin(); arg != deviceKernel->arg_end(); ++arg) {
+          //  auto newArg = VMap[arg];
+          //  for(User *U : newArg->users()){
+          //    if(Instruction *UI = dyn_cast<Instruction>(U)){
+          //      uses2remove.push_back(UI);
+          //    }
+          //  }
+          //}
+          //for(auto I : uses2remove)
+          //  I->eraseFromParent();
+
+          //replace the use of llvm.nvvm.read.ptx.sreg.* by new arguments
+          std::map<std::string, Instruction*> arg2CI;
+          for(inst_iterator I = inst_begin(newFunc),
+              E = inst_end(newFunc); I != E; ++I){
+            CallInst *CI = dyn_cast<CallInst>(&*I);
+            if(!CI) continue;
+            auto calledFuncName = CI->getCalledFunction()->getName();
+            if(calledFuncName == "llvm.nvvm.read.ptx.sreg.tid.x")
+              arg2CI["threadIdx.x"] = CI;
+            else if(calledFuncName == "llvm.nvvm.read.ptx.sreg.tid.y")
+              arg2CI["threadIdx.y"] = CI;
+            else if(calledFuncName == "llvm.nvvm.read.ptx.sreg.tid.z")
+              arg2CI["threadIdx.z"] = CI;
+            else if(calledFuncName == "llvm.nvvm.read.ptx.sreg.ntid.x")
+              arg2CI["blockDim.x"] = CI;
+            else if(calledFuncName == "llvm.nvvm.read.ptx.sreg.ntid.y")
+              arg2CI["blockDim.y"] = CI;
+            else if(calledFuncName == "llvm.nvvm.read.ptx.sreg.ntid.z")
+              arg2CI["blockDim.z"] = CI;
+            else if(calledFuncName == "llvm.nvvm.read.ptx.sreg.ctaid.x")
+              arg2CI["blockIdx.x"] = CI;
+            else if(calledFuncName == "llvm.nvvm.read.ptx.sreg.ctaid.y")
+              arg2CI["blockIdx.y"] = CI;
+            else if(calledFuncName == "llvm.nvvm.read.ptx.sreg.ctaid.z")
+              arg2CI["blockIdx.z"] = CI;
+            else if(calledFuncName == "llvm.nvvm.read.ptx.sreg.nctaid.x")
+              arg2CI["gridDim.x"] = CI;
+            else if(calledFuncName == "llvm.nvvm.read.ptx.sreg.nctaid.y")
+              arg2CI["gridDim.y"] = CI;
+            else if(calledFuncName == "llvm.nvvm.read.ptx.sreg.nctaiid.z")
+              arg2CI["gridDim.z"] = CI;
+          }
+
+          //set argument name in new kernel
+          int i = 0;
+          for(auto arg = newFunc->arg_begin(); arg != newFunc->arg_end(); ++arg) {
+            bool foundOldArg = false;
+            for(auto [oldArg, newArg] : VMap){
+              if(newArg == arg){
+                foundOldArg = true;
+                break;
+              }
+            }
+            if(foundOldArg) continue;
+
+            switch(i){
+              case 0:
+                arg->setName("gridDim.x");
+                break;
+              case 1:
+                arg->setName("gridDim.y");
+                break;
+              case 2:
+                arg->setName("gridDim.z");
+                break;
+              case 3:
+                arg->setName("blockDim.x");
+                break;
+              case 4:
+                arg->setName("blockDim.y");
+                break;
+              case 5:
+                arg->setName("blockDim.z");
+                break;
+              case 6:
+                arg->setName("blockIdx.x");
+                break;
+              case 7:
+                arg->setName("blockIdx.y");
+                break;
+              case 8:
+                arg->setName("blockIdx.z");
+                break;
+              case 9:
+                arg->setName("threadIdx.x");
+                break;
+              case 10:
+                arg->setName("threadIdx.y");
+                break;
+              case 11:
+                arg->setName("threadIdx.z");
+                break;
+            }
+            ++i;
+          }
+
+          errs() << *newFunc << "\n";
+          //remove cuda function call
+          std::vector<Instruction*> cudaCall2remove;
+          for(auto arg = newFunc->arg_begin(); arg != newFunc->arg_end(); ++arg) {
+            if(arg2CI.find(arg->getName()) == arg2CI.end()) continue;
+            cudaCall2remove.push_back(arg2CI[arg->getName()]);
+            for(User *U : arg2CI[arg->getName()]->users()){
+              Instruction *inst = dyn_cast<Instruction>(U);
+              if(!inst) continue;
+              for (auto OI = inst->op_begin(), OE = inst->op_end(); OI != OE; ++OI){
+                Value *val = *OI;
+                if(val == arg2CI[arg->getName()])
+                  *OI = arg;
+              }
+            }
+          }
+          for(auto I : cudaCall2remove)
+            I->eraseFromParent();
+
+          errs() << *newFunc << "\n";
 
           insts2Remove.push_back(CI);
         }
-        else if(calledFunc->getName() == "_ZL10cudaMallocIdE9cudaErrorPPT_m"){
+        else if(calledFunc->getName().contains("_ZL10cudaMallocIdE9cudaErrorPPT_m")){
           auto devDataPtr = CI->getArgOperand(0);
           auto AllocSize = CI->getArgOperand(1);
           PointerType* Ty = dyn_cast<PointerType>(devDataPtr->getType());
@@ -171,7 +382,7 @@ struct MergeKernel : public FunctionPass {
           }
           insts2Remove.push_back(CI);
         }
-        else if(calledFunc->getName() == "cudaMemcpy"){
+        else if(calledFunc->getName().contains("cudaMemcpy")){
           Type* Int1Ty = Type::getInt1Ty(F.getContext());
           CallSite CS(CI);
           SmallVector<Value *, 4> Args(CS.arg_begin(), CS.arg_end()-1);
@@ -193,7 +404,7 @@ struct MergeKernel : public FunctionPass {
           CallInst *NewCI = CallInst::Create(MemCpyFunc, args, "", CI);
           insts2Remove.push_back(CI);
         }
-        else if(calledFunc->getName() == "cudaDeviceSynchronize"){
+        else if(calledFunc->getName().contains("cudaDeviceSynchronize")){
           insts2Remove.push_back(CI);
         }
       }
@@ -266,13 +477,14 @@ struct MergeKernel : public FunctionPass {
         Value *incr = BinaryOperator::Create(Instruction::Add, indvar, ConstantInt::get(phiTy, 1),
                                   "indvar.next." + std::to_string(i), latch->getTerminator());
 
-        if(!prevHeader){
-          term = BranchInst::Create(kernelBB, header2latch[nextHeader], cmp, header);
-          indvar->addIncoming(ConstantInt::get(phiTy,0), nextHeader);
-        }
-        else if(!nextHeader){
+        //TODO: figure out why i need getName empty
+        if(!nextHeader || nextHeader->getName() == ""){
           term = BranchInst::Create(prevHeader, loopExit, cmp, header);
           indvar->addIncoming(ConstantInt::get(phiTy,0), kernelPred);
+        }
+        else if(!prevHeader){
+          term = BranchInst::Create(kernelBB, header2latch[nextHeader], cmp, header);
+          indvar->addIncoming(ConstantInt::get(phiTy,0), nextHeader);
         }
         else{
           term = BranchInst::Create(prevHeader, header2latch[nextHeader], cmp, header);

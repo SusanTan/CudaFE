@@ -20,11 +20,11 @@
 using namespace llvm;
 
 namespace {
-struct MergeKernel : public FunctionPass {
+struct MergeKernel : public ModulePass {
   static char ID;
   std::vector<Value*> loopDims;
-  std::map<int, Value*> loopDimMap;
-  MergeKernel() : FunctionPass(ID) {}
+  std::vector<Value*> indvars;
+  MergeKernel() : ModulePass(ID) {}
 
   void findThreadDim(Function &F, LoadInst *DimArg, bool blockOrGrid){
     //LoadInst *DimArg = dyn_cast<LoadInst>(CI->getArgOperand(2));
@@ -64,19 +64,14 @@ struct MergeKernel : public FunctionPass {
 
       for(int i=1; i<=3; ++i){
         Value *dim = CI->getArgOperand(i);
-        if(ConstantInt *dimConst = dyn_cast<ConstantInt>(dim))
-          if(dimConst->getZExtValue() == 1){
-            blockOrGrid ? loopDimMap[i] = dim : loopDimMap[i+3] = dim;
-            continue;
-          }
+        //if(ConstantInt *dimConst = dyn_cast<ConstantInt>(dim))
+        //  if(dimConst->getZExtValue() == 1){
+        //    continue;
+        //  }
         loopDims.push_back(dim);
-        blockOrGrid ? loopDimMap[i] = dim : loopDimMap[i+3] = dim;
         errs() << "mergeKernel: Dim " << i << " : " << *dim <<"\n";
       }
 
-      for(auto [idx, dim] : loopDimMap){
-        errs() << "mergeKernel: " << idx << " : " << *dim << "\n";
-      }
       foundDim = true;
       break;
     }
@@ -109,11 +104,10 @@ struct MergeKernel : public FunctionPass {
         if(CI->getArgOperand(0) != DimAlloca) continue;
         for(int i=1; i<=3; ++i){
           Value *dim = CI->getArgOperand(i);
-          if(ConstantInt *dimConst = dyn_cast<ConstantInt>(dim))
-            if(dimConst->getZExtValue() == 1)
-              continue;
+          //if(ConstantInt *dimConst = dyn_cast<ConstantInt>(dim))
+          //  if(dimConst->getZExtValue() == 1)
+          //    continue;
           loopDims.push_back(dim);
-          blockOrGrid ? loopDimMap[i] = dim : loopDimMap[i+3] = dim;
         }
         foundDim = true;
         break;
@@ -121,19 +115,25 @@ struct MergeKernel : public FunctionPass {
     }
   }
 
-  bool runOnFunction(Function &F) override {
+  bool runOnModule(Module &M) override {
+  std::vector<Function*>funcs2delete;
+  for (Module::iterator FI = M.begin(), FE = M.end(); FI != FE; ++FI) {
+    Function *F = &*FI;
+    F->removeFnAttr("target-features");
+    F->removeFnAttr("target-cpu");
     loopDims.clear();
     BasicBlock *kernelBB = nullptr;
     std::vector<Instruction*> insts2Remove;
-    for (inst_iterator I = inst_begin(&F), E = inst_end(&F); I != E; ++I) {
+    CallInst *kernelCall = nullptr;
+    Function *newFunc = nullptr;
+    Function *deviceKernel = nullptr;
+    for (inst_iterator I = inst_begin(F), E = inst_end(F); I != E; ++I) {
       if(CallInst *CI = dyn_cast<CallInst>(&*I)){
         Function* calledFunc = CI->getCalledFunction();
-        if(calledFunc->getName().contains("_ZL10cudaMallocIdE9cudaErrorPPT_m") ||
-           calledFunc->getName().contains("_ZN4dim3C2Ejjj")){
+        if(calledFunc->getName().contains("_ZN4dim3C2Ejjj")){
           insts2Remove.push_back(CI);
         }
         else if(calledFunc->getName().contains("cudaConfigureCall")){
-          CallInst *kernelCall = nullptr;
           errs() << "CudaFE: found cudaConfigureCall\n";
 
           //remove control flow caused by configuration failure
@@ -184,25 +184,27 @@ struct MergeKernel : public FunctionPass {
           }
 
           errs() << "MergeKernel: blocks per grid:\n";
-          findThreadDim(F, dyn_cast<LoadInst>(CI->getArgOperand(0)), false);
+          findThreadDim(*F, dyn_cast<LoadInst>(CI->getArgOperand(0)), false);
           errs() << "MergeKernel: threads per block:\n";
-          findThreadDim(F, dyn_cast<LoadInst>(CI->getArgOperand(2)), true);
+          findThreadDim(*F, dyn_cast<LoadInst>(CI->getArgOperand(2)), true);
 
           //find host kernel function and actual kernel name
-          Module *M = F.getParent();
-          StringRef host_kernelName = kernelCall->getCalledFunction()->getName();
+          Module *M = F->getParent();
+          auto hostKernel = kernelCall->getCalledFunction();
+          funcs2delete.push_back(hostKernel);
+          StringRef host_kernelName = hostKernel->getName();
           auto namePair = host_kernelName.rsplit("_CudaFE_");
           StringRef kernelName = namePair.second;
           errs() << "mergeKernel: found kernelName: " << kernelName << "\n";
 
           //Find device kernel function
-          Function *deviceKernel = nullptr;
           for (Module::iterator FI = M->begin(), FE = M->end(); FI != FE; ++FI) {
             Function *F = &*FI;
             auto funcName = F->getName();
             if(funcName.contains(kernelName) &&
                funcName != host_kernelName ){
               deviceKernel = F;
+              funcs2delete.push_back(deviceKernel);
               break;
             }
           }
@@ -222,7 +224,7 @@ struct MergeKernel : public FunctionPass {
                 ArrayRef<Type*>(argTys), //arg types;
                 false
               );
-          Function *newFunc = Function::Create(
+          newFunc = Function::Create(
                 funcTy,
                 deviceKernel->getLinkage(),
                 deviceKernel->getName(),
@@ -362,45 +364,49 @@ struct MergeKernel : public FunctionPass {
 
           errs() << *newFunc << "\n";
 
+
+
           insts2Remove.push_back(CI);
         }
         else if(calledFunc->getName().contains("_ZL10cudaMallocIdE9cudaErrorPPT_m")){
           auto devDataPtr = CI->getArgOperand(0);
           auto AllocSize = CI->getArgOperand(1);
           PointerType* Ty = dyn_cast<PointerType>(devDataPtr->getType());
-
+          PointerType* points2Ty = dyn_cast<PointerType>(Ty->getPointerElementType());
           Instruction* Malloc = CallInst::CreateMalloc(CI,
-                                             AllocSize->getType(), Ty->getElementType(), AllocSize,
+                                             AllocSize->getType(), points2Ty->getPointerElementType(), AllocSize,
                                              nullptr, nullptr, "");
+          new StoreInst(Malloc, devDataPtr, CI);
+          errs() << "mergeKernel: replaced cuda malloc with: " << *Malloc << "\n";
 
-          for (inst_iterator I = inst_begin(&F), E = inst_end(&F); I != E; ++I) {
-              for (Instruction::op_iterator I_Op = (&*I)->op_begin(), E_Op = (&*I)->op_end(); I_Op != E_Op; ++I_Op){
-                if(*I_Op == devDataPtr){
-                  *I_Op = Malloc;
-                }
-              }
-          }
+          //for (inst_iterator I = inst_begin(F), E = inst_end(F); I != E; ++I) {
+          //    for (Instruction::op_iterator I_Op = (&*I)->op_begin(), E_Op = (&*I)->op_end(); I_Op != E_Op; ++I_Op){
+          //      if(*I_Op == devDataPtr){
+          //        *I_Op = Malloc;
+          //      }
+          //    }
+          //}
           insts2Remove.push_back(CI);
         }
         else if(calledFunc->getName().contains("cudaMemcpy")){
-          Type* Int1Ty = Type::getInt1Ty(F.getContext());
+          Type* Int1Ty = Type::getInt1Ty(F->getContext());
           CallSite CS(CI);
           SmallVector<Value *, 4> Args(CS.arg_begin(), CS.arg_end()-1);
           Args.push_back(ConstantInt::getFalse(Int1Ty));
           ArrayRef<Value*> args(Args);
           std::vector<Type*> argTyVec;
-          argTyVec.push_back(PointerType::get(Type::getInt8Ty(F.getContext()), 0));
-          argTyVec.push_back(PointerType::get(Type::getInt8Ty(F.getContext()), 0));
-          argTyVec.push_back(Type::getInt64Ty(F.getContext()));
+          argTyVec.push_back(PointerType::get(Type::getInt8Ty(F->getContext()), 0));
+          argTyVec.push_back(PointerType::get(Type::getInt8Ty(F->getContext()), 0));
+          argTyVec.push_back(Type::getInt64Ty(F->getContext()));
           argTyVec.push_back(Int1Ty);
           ArrayRef<Type *> argTys(argTyVec);
           FunctionType* memcpyFuncTy = FunctionType::get(
-              Type::getVoidTy(F.getContext()), //return type
+              Type::getVoidTy(F->getContext()), //return type
               argTys,
               false
           );
 
-          auto MemCpyFunc = F.getParent()->getOrInsertFunction("llvm.memcpy.p0i8.p0i8.i64", memcpyFuncTy);
+          auto MemCpyFunc = F->getParent()->getOrInsertFunction("llvm.memcpy.p0i8.p0i8.i64", memcpyFuncTy);
           CallInst *NewCI = CallInst::Create(MemCpyFunc, args, "", CI);
           insts2Remove.push_back(CI);
         }
@@ -430,7 +436,10 @@ struct MergeKernel : public FunctionPass {
       //create headers
       std::map<BasicBlock*, Value*>header2itNum;
       for(auto itNum : loopDims){
-        auto header = BasicBlock::Create(kernelBB->getContext(), "header." + std::to_string(loopCnt), &F, kernelBB);
+        if(ConstantInt *constInt = dyn_cast<ConstantInt>(itNum))
+          if(constInt->getSExtValue() == 1)
+            continue;
+        auto header = BasicBlock::Create(kernelBB->getContext(), "header." + std::to_string(loopCnt), F, kernelBB);
         headerNests.push(header);
         header2itNum[header] = itNum;
         if(loopCnt == 0)
@@ -446,7 +455,7 @@ struct MergeKernel : public FunctionPass {
       std::map<BasicBlock*, BasicBlock*> header2latch;
       for(int i=loopCnt-1; i>=0; --i){
         auto header = headerNests.top();
-        auto latch = BasicBlock::Create(kernelBB->getContext(), "latch." + std::to_string(i), &F, kernelBB);
+        auto latch = BasicBlock::Create(kernelBB->getContext(), "latch." + std::to_string(i), F, kernelBB);
         if(!lastLatch)
           lastLatch = latch;
         BranchInst::Create(header, latch);
@@ -469,6 +478,7 @@ struct MergeKernel : public FunctionPass {
         //create phi node
         Type *phiTy = header2itNum[header]->getType();
         auto indvar = PHINode::Create(phiTy, 2, "indvar."+std::to_string(i), header);
+        indvars.push_back(indvar);
         CmpInst *cmp = CmpInst::Create(Instruction::ICmp, CmpInst::ICMP_ULT, indvar, header2itNum[header], "exitCheck." + std::to_string(i), header);
         BranchInst *term = nullptr;
 
@@ -501,11 +511,51 @@ struct MergeKernel : public FunctionPass {
 
     }
 
+
+    //replace kernel call
+    if(kernelCall){
+    std::vector<Value*> newKernelArgs;
+    for(int i=0; i<kernelCall->arg_size(); ++i){
+      errs() << "SUSAN: original arg " << *kernelCall->getArgOperand(i) << "\n";
+      newKernelArgs.push_back(kernelCall->getArgOperand(i));
+    }
+    std::reverse(indvars.begin(), indvars.end());
+    std::vector<Value*> indvarsExtended; int i=0;
+    for(auto itNum : loopDims){
+      errs() << "SUSAN: itnum: " << *itNum << "\n";
+      newKernelArgs.push_back(itNum);
+      if(ConstantInt *constInt = dyn_cast<ConstantInt>(itNum))
+        if(constInt->getSExtValue() == 1){
+          indvarsExtended.push_back(ConstantInt::get(Type::getInt32Ty(kernelCall->getContext()), 0));
+          continue;
+        }
+      indvarsExtended.push_back(indvars[i]);
+      ++i;
+    }
+    for(auto indvar : indvarsExtended){
+      errs() << "SUSAN: indvar " << *indvar << "\n";
+      newKernelArgs.push_back(indvar);
+    }
+    errs() << *(newFunc->getFunctionType()) << "\n";
+    CallInst *newKernelCall = CallInst::Create(
+          newFunc->getFunctionType(), //function type
+          newFunc, //function
+          ArrayRef<Value*>(newKernelArgs), //args
+          "",
+          kernelCall //insert before
+        );
+      insts2Remove.push_back(kernelCall);
+    }
+
     //delete cuda calls and control flows
     for(auto I : insts2Remove)
       I->eraseFromParent();
 
-    errs() << F << "\n";
+  }
+
+    //delete functions
+    for(auto f : funcs2delete)
+      f->eraseFromParent();
     return false;
   }
 }; // end of struct Hello

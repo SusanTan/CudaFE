@@ -24,6 +24,7 @@ struct MergeKernel : public ModulePass {
   static char ID;
   std::vector<Value*> loopDims;
   std::vector<Value*> indvars;
+  std::set<Function*>funcs2delete;
   MergeKernel() : ModulePass(ID) {}
 
   void findThreadDim(Function &F, LoadInst *DimArg, bool blockOrGrid){
@@ -116,7 +117,6 @@ struct MergeKernel : public ModulePass {
   }
 
   bool runOnModule(Module &M) override {
-  std::vector<Function*>funcs2delete;
   for (Module::iterator FI = M.begin(), FE = M.end(); FI != FE; ++FI) {
     Function *F = &*FI;
     F->removeFnAttr("target-features");
@@ -131,6 +131,7 @@ struct MergeKernel : public ModulePass {
       if(CallInst *CI = dyn_cast<CallInst>(&*I)){
         Function* calledFunc = CI->getCalledFunction();
         if(calledFunc->getName().contains("_ZN4dim3C2Ejjj")){
+          funcs2delete.insert(calledFunc);
           insts2Remove.push_back(CI);
         }
         else if(calledFunc->getName().contains("cudaConfigureCall")){
@@ -191,10 +192,11 @@ struct MergeKernel : public ModulePass {
           //find host kernel function and actual kernel name
           Module *M = F->getParent();
           auto hostKernel = kernelCall->getCalledFunction();
-          funcs2delete.push_back(hostKernel);
+          funcs2delete.insert(hostKernel);
           StringRef host_kernelName = hostKernel->getName();
           auto namePair = host_kernelName.rsplit("_CudaFE_");
           StringRef kernelName = namePair.second;
+          if(kernelName == "") kernelName = host_kernelName;
           errs() << "mergeKernel: found kernelName: " << kernelName << "\n";
 
           //Find device kernel function
@@ -204,7 +206,7 @@ struct MergeKernel : public ModulePass {
             if(funcName.contains(kernelName) &&
                funcName != host_kernelName ){
               deviceKernel = F;
-              funcs2delete.push_back(deviceKernel);
+              funcs2delete.insert(deviceKernel);
               break;
             }
           }
@@ -379,6 +381,7 @@ struct MergeKernel : public ModulePass {
           new StoreInst(Malloc, devDataPtr, CI);
           errs() << "mergeKernel: replaced cuda malloc with: " << *Malloc << "\n";
 
+          funcs2delete.insert(calledFunc);
           //for (inst_iterator I = inst_begin(F), E = inst_end(F); I != E; ++I) {
           //    for (Instruction::op_iterator I_Op = (&*I)->op_begin(), E_Op = (&*I)->op_end(); I_Op != E_Op; ++I_Op){
           //      if(*I_Op == devDataPtr){

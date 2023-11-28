@@ -157,20 +157,20 @@ struct MergeKernel : public ModulePass {
             BranchInst *CF2Remove = dyn_cast<BranchInst>(CI->getParent()->getTerminator());
             CmpInst *cmp = dyn_cast<CmpInst>(CF2Remove->getCondition());
             if(cmp){
-              if(cmp->getPredicate() == CmpInst::ICMP_NE){
+              if(cmp->getPredicate() == CmpInst::ICMP_EQ){
                 auto opnd0 = cmp->getOperand(0);
                 auto opnd1 = cmp->getOperand(1);
                 bool ConfigureThenBranchPattern = false;
                 if(ConstantInt *integer = dyn_cast<ConstantInt>(opnd0)){
                   if(integer->getZExtValue() == 0 && opnd1 == CI)
-                    ConfigureThenBranchPattern = true;
+                    ConfigureThenBranchPattern = false;
                 } else if(ConstantInt *integer = dyn_cast<ConstantInt>(opnd1)){
                   if(integer->getZExtValue() == 0 && opnd0 == CI)
                     ConfigureThenBranchPattern = true;
                 }
                 if(ConfigureThenBranchPattern){
-                  CF2Remove->setCondition(ConstantInt::get(Type::getInt1Ty(CF2Remove->getContext()), 0));
-                  kernelProfiles[CI]->kernelBB = CF2Remove->getSuccessor(1);
+                  CF2Remove->setCondition(ConstantInt::get(Type::getInt1Ty(CF2Remove->getContext()), 1));
+                  kernelProfiles[CI]->kernelBB = CF2Remove->getSuccessor(0);
                   errs() << "mergeKernel: kernelBB: " << *(kernelProfiles[CI]->kernelBB) << "\n";
 
                   //write metadata to the function call
@@ -202,11 +202,27 @@ struct MergeKernel : public ModulePass {
               }
             }
 
-            errs() << "MergeKernel: blocks per grid:\n";
-            findThreadDim(kernelProfiles[CI], *F, dyn_cast<LoadInst>(CI->getArgOperand(0)), false);
-            errs() << "MergeKernel: threads per block:\n";
-            findThreadDim(kernelProfiles[CI], *F, dyn_cast<LoadInst>(CI->getArgOperand(2)), true);
+            assert(kernelCall && "mergeKernel: din't find kernel call!\n");
+            errs() << "mergeKernel: kernel call: " << *(kernelCall) << "\n";
 
+            //TODO: mem2reg sort of changes everything with the pattern matching
+            errs() << "MergeKernel: blocks per grid:\n";
+            //if(isa<ConstantInt>(CI->getArgOperand(0))){
+              Value *dim = CI->getArgOperand(0);
+              kernelProfiles[CI]->loopDims.push_back(dim);
+            //}
+            //else{
+            //  findThreadDim(kernelProfiles[CI], *F, dyn_cast<LoadInst>(CI->getArgOperand(0)), false);
+            //}
+
+            errs() << "MergeKernel: threads per block:\n";
+            //if(isa<ConstantInt>(CI->getArgOperand(2))){
+              dim = CI->getArgOperand(2);
+              kernelProfiles[CI]->loopDims.push_back(dim);
+            //}
+            //else{
+            //  findThreadDim(kernelProfiles[CI], *F, dyn_cast<LoadInst>(CI->getArgOperand(2)), true);
+            //}
             //find host kernel function and actual kernel name
             Module *M = F->getParent();
             auto hostKernel = kernelCall->getCalledFunction();
@@ -229,12 +245,13 @@ struct MergeKernel : public ModulePass {
                 break;
               }
             }
-            errs() << "MergeKernel: found deviceKernel: " << deviceKernel->getName() << "\n";
+            errs() << "MergeKernel: found deviceKernel: " << *deviceKernel << "\n";
 
 
 
             //create a new function for kernel
             Type* i32Ty = Type::getInt32Ty(deviceKernel->getContext());
+            Type* i64Ty = Type::getInt64Ty(deviceKernel->getContext());
             std::vector<Type*>argTys;
             for(auto arg = deviceKernel->arg_begin(); arg != deviceKernel->arg_end(); ++arg)
               argTys.push_back(arg->getType());
@@ -249,10 +266,10 @@ struct MergeKernel : public ModulePass {
                   funcTy,
                   deviceKernel->getLinkage(),
                   deviceKernel->getName(),
-                  *M
+                  deviceKernel->getParent()
                 );
             newFunc = kernelProfiles[CI]->newFunc;
-            errs() << "MergeKernel: created new Function: " << *(newFunc) << "\n";
+            deviceKernel->setSubprogram(nullptr);
 
             //copy old kernel over to the new
             ValueToValueMapTy VMap;
@@ -262,6 +279,8 @@ struct MergeKernel : public ModulePass {
               NewFArgIt->setName(ArgName);
               VMap[&Arg] = &(*NewFArgIt++);
             }
+
+            errs() << "MergeKernel: created new Function: " << *(newFunc) << "\n";
             SmallVector<ReturnInst*, 8> Returns;
             llvm::CloneFunctionInto(newFunc, deviceKernel, VMap, false, Returns);
             errs() << *(newFunc) << "\n";
@@ -540,17 +559,54 @@ struct MergeKernel : public ModulePass {
         }
         std::reverse(indvars.begin(), indvars.end());
         std::vector<Value*> indvarsExtended; i=0;
-        for(auto itNum : loopDims){
-          errs() << "SUSAN: itnum: " << *itNum << "\n";
-          newKernelArgs.push_back(itNum);
-          if(ConstantInt *constInt = dyn_cast<ConstantInt>(itNum))
-            if(constInt->getSExtValue() == 1){
-              indvarsExtended.push_back(ConstantInt::get(Type::getInt32Ty(kernelCall->getContext()), 0));
-              continue;
-            }
-          indvarsExtended.push_back(indvars[i]);
-          ++i;
+        auto i32Ty = Type::getInt32Ty(kernelCall->getContext());
+        if(loopDims.size() == 2){
+          //push dims
+          auto dim = loopDims[0];
+          auto arg = dim;
+          if(!dim->getType()->isIntegerTy(32))
+            arg = CastInst::CreateTruncOrBitCast(dim, i32Ty, "dim.cast", kernelCall);
+          newKernelArgs.push_back(arg);
+          newKernelArgs.push_back(ConstantInt::get(i32Ty, 1));
+          newKernelArgs.push_back(ConstantInt::get(i32Ty, 1));
+          dim = loopDims[1];
+          arg = dim;
+          if(!dim->getType()->isIntegerTy(32))
+            arg = CastInst::CreateTruncOrBitCast(dim, i32Ty, "dim.cast", kernelCall);
+          newKernelArgs.push_back(arg);
+          newKernelArgs.push_back(ConstantInt::get(i32Ty, 1));
+          newKernelArgs.push_back(ConstantInt::get(i32Ty, 1));
+
+
+          //create indvars
+          auto indvar = indvars[0];
+          arg = indvar;
+          if(!arg->getType()->isIntegerTy(32))
+            arg = CastInst::CreateTruncOrBitCast(indvar, i32Ty, "dim.cast", kernelCall);
+          indvarsExtended.push_back(arg);
+          indvarsExtended.push_back(ConstantInt::get(i32Ty, 0));
+          indvarsExtended.push_back(ConstantInt::get(i32Ty, 0));
+          indvar = indvars[1];
+          arg = indvar;
+          if(!arg->getType()->isIntegerTy(32))
+            arg = CastInst::CreateTruncOrBitCast(indvar, i32Ty, "dim.cast", kernelCall);
+          indvarsExtended.push_back(arg);
+          indvarsExtended.push_back(ConstantInt::get(Type::getInt32Ty(kernelCall->getContext()), 0));
+          indvarsExtended.push_back(ConstantInt::get(Type::getInt32Ty(kernelCall->getContext()), 0));
+        } else {
+          for(auto itNum : loopDims){
+            errs() << "SUSAN: itnum: " << *itNum << "\n";
+            newKernelArgs.push_back(itNum);
+            if(ConstantInt *constInt = dyn_cast<ConstantInt>(itNum))
+              if(constInt->getSExtValue() == 1){
+                indvarsExtended.push_back(ConstantInt::get(Type::getInt32Ty(kernelCall->getContext()), 0));
+                continue;
+              }
+            indvarsExtended.push_back(indvars[i]);
+            ++i;
+          }
         }
+
         for(auto indvar : indvarsExtended){
           errs() << "mergeKernel: indvar " << *indvar << "\n";
           newKernelArgs.push_back(indvar);

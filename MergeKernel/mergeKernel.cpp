@@ -81,6 +81,7 @@ struct MergeKernel : public ModulePass {
         errs() << "mergeKernel: Dim " << i << " : " << *dim <<"\n";
       }
 
+
       foundDim = true;
       break;
     }
@@ -139,13 +140,28 @@ struct MergeKernel : public ModulePass {
           if(calledFunc->getName().contains("_ZN4dim3C2Ejjj")){
             funcs2delete.insert(calledFunc);
             insts2Remove.push_back(CI);
-          }
-          else if(calledFunc->getName().contains("cudaFree")){
+
+            Value *dimPtr = CI->getArgOperand(0);
+            PointerType *dimPtrTy = dyn_cast<PointerType>(dimPtr->getType());
+            assert(dimPtrTy && "dimPtr isn't of pointer type!\n");
+            auto i32Ty = Type::getInt32Ty(CI->getContext());
+            for(int i=1; i<=3; ++i){
+              Value *dim = CI->getArgOperand(i);
+              //replace _ZN4dim3C2Ejjj with stores to dim3 struct
+              std::vector<Value*>idxList;
+              idxList.push_back( ConstantInt::get(i32Ty, 0));
+              idxList.push_back( ConstantInt::get(i32Ty, i-1));
+              auto gep = GetElementPtrInst::Create(dimPtrTy->getPointerElementType(), dimPtr, idxList, "dim3gep."+std::to_string(i-1), CI);
+              //StoreInst (Value *Val, Value *Ptr, Instruction *InsertBefore)
+              new StoreInst(dim, gep, CI);
+           }
+        }
+        else if(calledFunc->getName().contains("cudaFree")){
             auto ptr = CI->getArgOperand(0);
             CallInst::CreateFree(ptr, CI);
             insts2Remove.push_back(CI);
-          }
-          else if(calledFunc->getName().contains("cudaConfigureCall")){
+        }
+        else if(calledFunc->getName().contains("cudaConfigureCall")){
             //temporous registers
             CallInst *kernelCall = nullptr;
             Function *deviceKernel = nullptr;
@@ -157,72 +173,78 @@ struct MergeKernel : public ModulePass {
             BranchInst *CF2Remove = dyn_cast<BranchInst>(CI->getParent()->getTerminator());
             CmpInst *cmp = dyn_cast<CmpInst>(CF2Remove->getCondition());
             if(cmp){
-              if(cmp->getPredicate() == CmpInst::ICMP_EQ){
+              if(cmp->getPredicate() == CmpInst::ICMP_EQ || cmp->getPredicate() == CmpInst::ICMP_NE){
                 auto opnd0 = cmp->getOperand(0);
                 auto opnd1 = cmp->getOperand(1);
                 bool ConfigureThenBranchPattern = false;
                 if(ConstantInt *integer = dyn_cast<ConstantInt>(opnd0)){
-                  if(integer->getZExtValue() == 0 && opnd1 == CI)
+                  if(integer->getZExtValue() == 0 && opnd1 == CI && cmp->getPredicate() == CmpInst::ICMP_EQ)
                     ConfigureThenBranchPattern = false;
-                } else if(ConstantInt *integer = dyn_cast<ConstantInt>(opnd1)){
-                  if(integer->getZExtValue() == 0 && opnd0 == CI)
+                  else if (integer->getZExtValue() == 0 && opnd1 == CI && cmp->getPredicate() == CmpInst::ICMP_NE)
                     ConfigureThenBranchPattern = true;
+                } else if(ConstantInt *integer = dyn_cast<ConstantInt>(opnd1)){
+                  if(integer->getZExtValue() == 0 && opnd0 == CI && cmp->getPredicate() == CmpInst::ICMP_EQ)
+                    ConfigureThenBranchPattern = true;
+                  else if (integer->getZExtValue() == 0 && opnd0 == CI && cmp->getPredicate() == CmpInst::ICMP_NE)
+                    ConfigureThenBranchPattern = false;
                 }
                 if(ConfigureThenBranchPattern){
                   CF2Remove->setCondition(ConstantInt::get(Type::getInt1Ty(CF2Remove->getContext()), 1));
                   kernelProfiles[CI]->kernelBB = CF2Remove->getSuccessor(0);
                   errs() << "mergeKernel: kernelBB: " << *(kernelProfiles[CI]->kernelBB) << "\n";
+                } else {
+                  CF2Remove->setCondition(ConstantInt::get(Type::getInt1Ty(CF2Remove->getContext()), 0));
+                  kernelProfiles[CI]->kernelBB = CF2Remove->getSuccessor(1);
+                  errs() << "mergeKernel: kernelBB: " << *(kernelProfiles[CI]->kernelBB) << "\n";
+                }
 
-                  //write metadata to the function call
-                  for(auto &I : *(kernelProfiles[CI]->kernelBB)){
-                    if(CallInst *ci = dyn_cast<CallInst>(&I)){
-                      Function *calledFunc = ci->getCalledFunction();
-                      for (inst_iterator I = inst_begin(calledFunc), E = inst_end(calledFunc); I != E; ++I) {
-                        if(CallInst *callInst = dyn_cast<CallInst>(&*I)){
-                          Function *calledF = callInst->getCalledFunction();
-                          if(calledF->getName().contains("cudaLaunch")){
-                            kernelProfiles[CI]->kernelCall = ci;
-                            kernelCall = ci;
-                            break;
-                          }
+                //write metadata to the function call
+                for(auto &I : *(kernelProfiles[CI]->kernelBB)){
+                  if(CallInst *ci = dyn_cast<CallInst>(&I)){
+                    Function *calledFunc = ci->getCalledFunction();
+                    for (inst_iterator I = inst_begin(calledFunc), E = inst_end(calledFunc); I != E; ++I) {
+                      if(CallInst *callInst = dyn_cast<CallInst>(&*I)){
+                        Function *calledF = callInst->getCalledFunction();
+                        if(calledF->getName().contains("cudaLaunch")){
+                          kernelProfiles[CI]->kernelCall = ci;
+                          kernelCall = ci;
+                          break;
                         }
                       }
                     }
-
-                    if(kernelCall)
-                      break;
                   }
 
-                  assert(kernelCall && "mergeKernel: din't find kernel call!\n");
-                  errs() << "mergeKernel: kernel call: " << *(kernelCall) << "\n";
-
-
-                  insts2Remove.push_back(cmp);
+                  if(kernelCall)
+                    break;
                 }
-              }
+
+                assert(kernelCall && "mergeKernel: din't find kernel call!\n");
+                errs() << "mergeKernel: kernel call: " << *(kernelCall) << "\n";
+                insts2Remove.push_back(cmp);
             }
+          }
 
             assert(kernelCall && "mergeKernel: din't find kernel call!\n");
             errs() << "mergeKernel: kernel call: " << *(kernelCall) << "\n";
 
             //TODO: mem2reg sort of changes everything with the pattern matching
             errs() << "MergeKernel: blocks per grid:\n";
-            //if(isa<ConstantInt>(CI->getArgOperand(0))){
+            if(isa<ConstantInt>(CI->getArgOperand(0))){
               Value *dim = CI->getArgOperand(0);
               kernelProfiles[CI]->loopDims.push_back(dim);
-            //}
-            //else{
-            //  findThreadDim(kernelProfiles[CI], *F, dyn_cast<LoadInst>(CI->getArgOperand(0)), false);
-            //}
+            }
+            else{
+              findThreadDim(kernelProfiles[CI], *F, dyn_cast<LoadInst>(CI->getArgOperand(0)), false);
+            }
 
             errs() << "MergeKernel: threads per block:\n";
-            //if(isa<ConstantInt>(CI->getArgOperand(2))){
-              dim = CI->getArgOperand(2);
+            if(isa<ConstantInt>(CI->getArgOperand(2))){
+              Value *dim = CI->getArgOperand(2);
               kernelProfiles[CI]->loopDims.push_back(dim);
-            //}
-            //else{
-            //  findThreadDim(kernelProfiles[CI], *F, dyn_cast<LoadInst>(CI->getArgOperand(2)), true);
-            //}
+            }
+            else{
+              findThreadDim(kernelProfiles[CI], *F, dyn_cast<LoadInst>(CI->getArgOperand(2)), true);
+            }
             //find host kernel function and actual kernel name
             Module *M = F->getParent();
             auto hostKernel = kernelCall->getCalledFunction();

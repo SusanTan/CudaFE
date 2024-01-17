@@ -503,7 +503,7 @@ struct MergeKernel : public ModulePass {
           headerNests.push(header);
           header2itNum[header] = itNum;
           if(loopCnt == 0)
-            BranchInst::Create(header, pred);
+            auto br = BranchInst::Create(header, pred);
           pred = header;
           loopCnt++;
           lastheader = header;
@@ -518,7 +518,8 @@ struct MergeKernel : public ModulePass {
           auto latch = BasicBlock::Create(kernelBB->getContext(), "latch." + std::to_string(i), F, kernelBB);
           if(!lastLatch)
             lastLatch = latch;
-          BranchInst::Create(header, latch);
+          auto br = BranchInst::Create(header, latch);
+
           header2latch[header] = latch;
           headerNests.pop();
         }
@@ -561,6 +562,12 @@ struct MergeKernel : public ModulePass {
           else{
             term = BranchInst::Create(prevHeader, header2latch[nextHeader], cmp, header);
             indvar->addIncoming(ConstantInt::get(phiTy,0), nextHeader);
+          }
+
+          if(i == 0){
+            LLVMContext& C = term->getContext();
+            MDNode* N = MDNode::get(C, MDString::get(C, ""));
+            term->setMetadata("splendid.doall.loop", N);
           }
           indvar->addIncoming(incr, header2latch[header]);
           prevHeader = header;

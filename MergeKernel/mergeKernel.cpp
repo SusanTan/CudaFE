@@ -154,7 +154,7 @@ struct MergeKernel : public ModulePass {
               auto gep = GetElementPtrInst::Create(dimPtrTy->getPointerElementType(), dimPtr, idxList, "dim3gep."+std::to_string(i-1), CI);
               //StoreInst (Value *Val, Value *Ptr, Instruction *InsertBefore)
               new StoreInst(dim, gep, CI);
-           }
+            }
         }
         else if(calledFunc->getName().contains("cudaFree")){
             auto ptr = CI->getArgOperand(0);

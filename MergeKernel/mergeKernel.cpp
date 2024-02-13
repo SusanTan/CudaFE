@@ -33,6 +33,7 @@ struct MergeKernel : public ModulePass {
   static char ID;
   std::vector<Value*> loopDims;
   std::set<Function*>funcs2delete;
+  int mdID = 0;
   MergeKernel() : ModulePass(ID) {}
 
   void findThreadDim(KernelProfile *kernelProfile, Function &F, LoadInst *DimArg, bool blockOrGrid){
@@ -478,8 +479,9 @@ struct MergeKernel : public ModulePass {
             MDNode *mdSize = nullptr;
             if(Instruction* sizeInst = dyn_cast<Instruction>(cpySize)){
               std::string mdDataSize = "splendid.target.datasize";
-              mdSize = MDNode::get(C, MDString::get(C, ""));
+              mdSize = MDNode::get(C, MDString::get(C, std::to_string(mdID)));
               sizeInst->setMetadata("splendid.target.datasize", mdSize);
+              mdID++;
             }
 
             MDNode* N;
@@ -487,8 +489,6 @@ struct MergeKernel : public ModulePass {
                      N = MDNode::get(C, ValueAsMetadata::get(dyn_cast<ConstantInt>(cpySize)));
             mode->isOne() ? NewCI->setMetadata("splendid.target.mapdata.to", N) :
                             NewCI->setMetadata("splendid.target.mapdata.from", N);
-
-
             insts2Remove.push_back(CI);
           }
           else if(calledFunc->getName().contains("cudaDeviceSynchronize")){

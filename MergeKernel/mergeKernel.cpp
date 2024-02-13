@@ -447,6 +447,7 @@ struct MergeKernel : public ModulePass {
             insts2Remove.push_back(CI);
           }
           else if(calledFunc->getName().contains("cudaMemcpy")){
+            errs() << "mergeKernel: cudaMemcpy: " << *CI << "\n";
             Type* Int1Ty = Type::getInt1Ty(F->getContext());
             CallSite CS(CI);
             SmallVector<Value *, 4> Args(CS.arg_begin(), CS.arg_end()-1);
@@ -466,6 +467,28 @@ struct MergeKernel : public ModulePass {
 
             auto MemCpyFunc = F->getParent()->getOrInsertFunction("llvm.memcpy.p0i8.p0i8.i64", memcpyFuncTy);
             CallInst *NewCI = CallInst::Create(MemCpyFunc, args, "", CI);
+
+            //add metadata to identify omp target mapping
+            Instruction* dest = dyn_cast<Instruction>(CI->getArgOperand(0));
+            //Instruction* src = CI->getArgOperand(1);
+            Value* cpySize = CI->getArgOperand(2);
+            ConstantInt* mode = dyn_cast<ConstantInt>(CI->getArgOperand(3));
+            LLVMContext& C = NewCI->getContext();
+            std::string mdDevice = "splendid.target.mapdata";
+            MDNode *mdSize = nullptr;
+            if(Instruction* sizeInst = dyn_cast<Instruction>(cpySize)){
+              std::string mdDataSize = "splendid.target.datasize";
+              mdSize = MDNode::get(C, MDString::get(C, ""));
+              sizeInst->setMetadata("splendid.target.datasize", mdSize);
+            }
+
+            MDNode* N;
+            mdSize ? N = MDNode::get(C, mdSize) :
+                     N = MDNode::get(C, ValueAsMetadata::get(dyn_cast<ConstantInt>(cpySize)));
+            mode->isOne() ? NewCI->setMetadata("splendid.target.mapdata.to", N) :
+                            NewCI->setMetadata("splendid.target.mapdata.from", N);
+
+
             insts2Remove.push_back(CI);
           }
           else if(calledFunc->getName().contains("cudaDeviceSynchronize")){

@@ -576,7 +576,17 @@ struct MergeKernel : public ModulePass {
 
           //TODO: figure out why i need getName empty
           errs() << "mergeKernel: nextHeader: "<< nextHeader << "\n";
-          if(!nextHeader || !nextHeader->hasName() || nextHeader->getName() == ""){
+          errs() << "mergeKernel: prevHeader: "<< prevHeader << "\n";
+          errs() << "mergeKernel: loopExit: "<< loopExit << "\n";
+          errs() << "mergeKernel: cmp: "<< cmp << "\n";
+          errs() << "mergeKernel: header: "<< header << "\n";
+
+          //a single loop
+          if(!nextHeader && !prevHeader){
+            term = BranchInst::Create(kernelBB, loopExit, cmp, header);
+            indvar->addIncoming(ConstantInt::get(phiTy,0), kernelPred);
+          }
+          else if(!nextHeader || !nextHeader->hasName() || nextHeader->getName() == ""){
             term = BranchInst::Create(prevHeader, loopExit, cmp, header);
             indvar->addIncoming(ConstantInt::get(phiTy,0), kernelPred);
           }

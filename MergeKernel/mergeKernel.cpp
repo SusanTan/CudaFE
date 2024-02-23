@@ -138,7 +138,11 @@ struct MergeKernel : public ModulePass {
       for (inst_iterator I = inst_begin(F), E = inst_end(F); I != E; ++I) {
         if(CallInst *CI = dyn_cast<CallInst>(&*I)){
           Function* calledFunc = CI->getCalledFunction();
-          if(calledFunc->getName().contains("_ZN4dim3C2Ejjj")){
+          if(calledFunc->getName().contains("llvm.nvvm.barrier")){
+            funcs2delete.insert(calledFunc);
+            insts2Remove.push_back(CI);
+          }
+          else if(calledFunc->getName().contains("_ZN4dim3C2Ejjj")){
             funcs2delete.insert(calledFunc);
             insts2Remove.push_back(CI);
 
@@ -321,39 +325,6 @@ struct MergeKernel : public ModulePass {
             //for(auto I : uses2remove)
             //  I->eraseFromParent();
 
-            //replace the use of llvm.nvvm.read.ptx.sreg.* by new arguments
-            std::map<std::string, Instruction*> arg2CI;
-            for(inst_iterator I = inst_begin(newFunc),
-                E = inst_end(newFunc); I != E; ++I){
-              CallInst *ci = dyn_cast<CallInst>(&*I);
-              if(!ci) continue;
-              auto calledFuncName = ci->getCalledFunction()->getName();
-              if(calledFuncName == "llvm.nvvm.read.ptx.sreg.tid.x")
-                arg2CI["threadIdx.x"] = ci;
-              else if(calledFuncName == "llvm.nvvm.read.ptx.sreg.tid.y")
-                arg2CI["threadIdx.y"] = ci;
-              else if(calledFuncName == "llvm.nvvm.read.ptx.sreg.tid.z")
-                arg2CI["threadIdx.z"] = ci;
-              else if(calledFuncName == "llvm.nvvm.read.ptx.sreg.ntid.x")
-                arg2CI["blockDim.x"] = ci;
-              else if(calledFuncName == "llvm.nvvm.read.ptx.sreg.ntid.y")
-                arg2CI["blockDim.y"] = ci;
-              else if(calledFuncName == "llvm.nvvm.read.ptx.sreg.ntid.z")
-                arg2CI["blockDim.z"] = ci;
-              else if(calledFuncName == "llvm.nvvm.read.ptx.sreg.ctaid.x")
-                arg2CI["blockIdx.x"] = ci;
-              else if(calledFuncName == "llvm.nvvm.read.ptx.sreg.ctaid.y")
-                arg2CI["blockIdx.y"] = ci;
-              else if(calledFuncName == "llvm.nvvm.read.ptx.sreg.ctaid.z")
-                arg2CI["blockIdx.z"] = ci;
-              else if(calledFuncName == "llvm.nvvm.read.ptx.sreg.nctaid.x")
-                arg2CI["gridDim.x"] = ci;
-              else if(calledFuncName == "llvm.nvvm.read.ptx.sreg.nctaid.y")
-                arg2CI["gridDim.y"] = ci;
-              else if(calledFuncName == "llvm.nvvm.read.ptx.sreg.nctaiid.z")
-                arg2CI["gridDim.z"] = ci;
-            }
-
             //set argument name in new kernel
             int i = 0;
             for(auto arg = newFunc->arg_begin(); arg != newFunc->arg_end(); ++arg) {
@@ -407,23 +378,54 @@ struct MergeKernel : public ModulePass {
               ++i;
             }
 
-            //remove cuda function call
+            //replace the use of llvm.nvvm.read.ptx.sreg.* by new arguments
+            //TODO: map doesn't accomodate multiple calls
             std::vector<Instruction*> cudaCall2remove;
-            for(auto arg = newFunc->arg_begin(); arg != newFunc->arg_end(); ++arg) {
-              if(arg2CI.find(arg->getName()) == arg2CI.end()) continue;
-              cudaCall2remove.push_back(arg2CI[arg->getName()]);
-              for(User *U : arg2CI[arg->getName()]->users()){
-                Instruction *inst = dyn_cast<Instruction>(U);
-                if(!inst) continue;
-                for (auto OI = inst->op_begin(), OE = inst->op_end(); OI != OE; ++OI){
-                  Value *val = *OI;
-                  if(val == arg2CI[arg->getName()])
-                    *OI = arg;
+            for(inst_iterator I = inst_begin(newFunc),
+                E = inst_end(newFunc); I != E; ++I){
+              CallInst *ci = dyn_cast<CallInst>(&*I);
+              if(!ci) continue;
+              auto calledFuncName = ci->getCalledFunction()->getName();
+
+              std::map<std::string, std::string> nvvmCall2arg {
+                { "llvm.nvvm.read.ptx.sreg.tid.x", "threadIdx.x"},
+                { "llvm.nvvm.read.ptx.sreg.tid.y", "threadIdx.y"},
+                { "llvm.nvvm.read.ptx.sreg.tid.z", "threadIdx.z"},
+                { "llvm.nvvm.read.ptx.sreg.ntid.x", "blockDim.x"},
+                { "llvm.nvvm.read.ptx.sreg.ntid.y", "blockDim.y"},
+                { "llvm.nvvm.read.ptx.sreg.ntid.z", "blockDim.z"},
+                { "llvm.nvvm.read.ptx.sreg.ctaid.x", "blockIdx.x"},
+                { "llvm.nvvm.read.ptx.sreg.ctaid.y", "blockIdx.y"},
+                { "llvm.nvvm.read.ptx.sreg.ctaid.z", "blockIdx.z"},
+                { "llvm.nvvm.read.ptx.sreg.nctaid.x", "gridDim.x"},
+                { "llvm.nvvm.read.ptx.sreg.nctaid.y", "gridDim.y"},
+                { "llvm.nvvm.read.ptx.sreg.nctaid.z", "gridDim.z"}
+              };
+
+              if(nvvmCall2arg.find(calledFuncName) == nvvmCall2arg.end()) continue;
+              auto argName = nvvmCall2arg[calledFuncName];
+
+              cudaCall2remove.push_back(ci);
+              for(auto arg = newFunc->arg_begin(); arg != newFunc->arg_end(); ++arg){
+                if(arg->getName() != argName) continue;
+                for(User *U : ci->users()){
+                  Instruction *inst = dyn_cast<Instruction>(U);
+                  if(!inst) continue;
+                  for (auto OI = inst->op_begin(), OE = inst->op_end(); OI != OE; ++OI){
+                    Value *val = *OI;
+                    if(val == ci)
+                      *OI = arg;
+                  }
                 }
               }
             }
-            for(auto I : cudaCall2remove)
+
+            for(auto I : cudaCall2remove){
+              errs() << "mergeKernel: cudaCall2remove: " << *I << "\n";
+              errs() << "mergeKernel: what does I belong to?" <<  I->getParent()->getName();
               I->eraseFromParent();
+            }
+            errs() << "MergeKernel: newFunc is" << *newFunc << "\n";
             insts2Remove.push_back(CI);
           }
           else if(calledFunc->getName().contains("_ZL10cudaMallocIdE9cudaErrorPPT_m")){

@@ -428,7 +428,7 @@ struct MergeKernel : public ModulePass {
             errs() << "MergeKernel: newFunc is" << *newFunc << "\n";
             insts2Remove.push_back(CI);
           }
-          else if(calledFunc->getName().contains("_ZL10cudaMallocIdE9cudaErrorPPT_m")){
+          else if(calledFunc->getName().contains("cudaMalloc") && calledFunc->getName() != "cudaMalloc"){
             auto devDataPtr = CI->getArgOperand(0);
             auto AllocSize = CI->getArgOperand(1);
             PointerType* Ty = dyn_cast<PointerType>(devDataPtr->getType());

@@ -32,7 +32,6 @@ class KernelProfile{
 
 struct MergeKernel : public ModulePass {
   static char ID;
-  std::vector<Value*> loopDims;
   std::set<Function*>funcs2delete;
   int mdID = 0;
   MergeKernel() : ModulePass(ID) {}
@@ -134,7 +133,6 @@ struct MergeKernel : public ModulePass {
       Function *F = &*FI;
       F->removeFnAttr("target-features");
       F->removeFnAttr("target-cpu");
-      loopDims.clear();
       BasicBlock *kernelBB = nullptr;
       std::vector<Instruction*> insts2Remove;
       for (inst_iterator I = inst_begin(F), E = inst_end(F); I != E; ++I) {

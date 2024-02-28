@@ -16,6 +16,7 @@
 #include "IDMap.h"
 #include "llvm/Transforms/Utils/ValueMapper.h"
 #include "llvm/Transforms/Utils/Cloning.h"
+#include "llvm/IR/Operator.h"
 
 using namespace llvm;
 
@@ -127,6 +128,7 @@ struct MergeKernel : public ModulePass {
   }
 
   bool runOnModule(Module &M) override {
+    //transform target
     for (Module::iterator FI = M.begin(), FE = M.end(); FI != FE; ++FI) {
       std::map<CallInst*, KernelProfile*> kernelProfiles;
       Function *F = &*FI;
@@ -703,6 +705,95 @@ struct MergeKernel : public ModulePass {
     //delete functions
     for(auto f : funcs2delete)
       f->eraseFromParent();
+
+    //process shared variables
+     std::map<Function*, std::set<Instruction*>> func2SharedMems;
+     std::map<Function*, std::set<GlobalVariable*>> func2SharedGlobs;
+     std::map<GlobalVariable*, std::set<Instruction*>> glob2Insts;
+     std::map<Instruction*, User::op_iterator> inst2opIt;
+     std::map<Instruction*, GEPOperator*> inst2gepOp;
+     for (Module::global_iterator I = M.global_begin(), E = M.global_end();
+           I != E; ++I) {
+         GlobalVariable* globVal = &*I;
+         if(!globVal->hasInitializer()) continue;
+         if(globVal->getAddressSpace() != 3) continue;
+         for(User *U : globVal->users()){
+           ConstantExpr *UE = dyn_cast<ConstantExpr>(U);
+           errs() << "UE: " << *UE << "\n";
+           if(!UE) continue;
+
+           //find instruction that uses the expr
+           for(User *ExprU : UE->users()){
+              Instruction* UI = dyn_cast<Instruction>(ExprU);
+              errs() << "ExprU: " << *ExprU << "\n";
+              if(!UI){
+                auto gepExpr = dyn_cast<GEPOperator>(ExprU);
+                if(!gepExpr) continue;
+                for(auto gepU : gepExpr->users()){
+                  auto LI = dyn_cast<Instruction>(gepU);
+                  if(!LI) continue;
+                  inst2gepOp[LI] = gepExpr;
+                }
+                continue;
+              }
+              Function *func = UI->getParent()->getParent();
+              func2SharedMems[func].insert(UI);
+              glob2Insts[globVal].insert(UI);
+              func2SharedGlobs[func].insert(globVal);
+
+              for (auto OI = UI->op_begin(), OE = UI->op_end(); OI != OE; ++OI){
+                Value *val = *OI;
+                if(val == UE)
+                  inst2opIt[UI] = OI;
+              }
+           }
+         }
+     }
+     for(auto [func, sharedGlobs] : func2SharedGlobs){
+       const DataLayout &DL = M.getDataLayout();
+       int i=0;
+       for(auto glob : sharedGlobs){
+          PointerType* ty = dyn_cast<PointerType>(glob->getType());
+          if(!ty){
+            errs() << "WARNINGS: shared object ty is not a pointer type\n";
+            continue;
+          }
+
+          Type* pointedTy = ty->getPointerElementType();
+          auto &entryBB = func->getEntryBlock();
+          auto term = entryBB.getTerminator();
+          AllocaInst *sharedAlloc = new AllocaInst(pointedTy, 0, nullptr, "sharedMem"+std::to_string(i), &(entryBB.front()));
+          ++i;
+          for(auto globInst : glob2Insts[glob]){
+            if(globInst->getParent()->getParent() != func) continue;
+            if(inst2opIt.find(globInst) != inst2opIt.end())
+              *(inst2opIt[globInst]) = sharedAlloc;
+            errs() << "gepinst: " << *globInst << "\n";
+          }
+          for(auto [LI, gepOp] : inst2gepOp){
+            if(LI->getParent()->getParent() != func) continue;
+            std::vector<Value*> idxList(gepOp->idx_begin(), gepOp->idx_end());
+            auto gepInst = GetElementPtrInst::Create(
+                  gepOp->getSourceElementType(),
+                  sharedAlloc,
+                  makeArrayRef(idxList),
+                  "sharedMem.gep" + std::to_string(i),
+                  LI
+                );
+            for (auto OI = LI->op_begin(), OE = LI->op_end(); OI != OE; ++OI){
+              if(*OI == gepOp)
+                *OI = gepInst;
+            }
+
+          }
+
+       }
+     }
+     for(auto [func, sharedMemVars] : func2SharedMems){
+       errs() << "mergeKernel: func that contain shared mem objects: " << func->getName() << "\n";
+       for(auto var : sharedMemVars)
+         errs() << "mergeKernel: sharedMemvar: " << *var << "\n";
+     }
 
     return false;
   }

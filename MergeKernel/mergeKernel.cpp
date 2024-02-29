@@ -632,7 +632,10 @@ struct MergeKernel : public ModulePass {
               kernelProfile->dim2classify[header2itNum[header]] == 2){
             LLVMContext& C = term->getContext();
             MDNode* N = MDNode::get(C, MDString::get(C, ""));
-            term->setMetadata("splendid.doall.loop", N);
+            if(kernelProfile->dim2classify[header2itNum[header]] == 1)
+              term->setMetadata("splendid.doall.loop.grid", N);
+            if(kernelProfile->dim2classify[header2itNum[header]] == 2)
+              term->setMetadata("splendid.doall.loop.block", N);
             errs() << "mergeKernel: create metadata" << *term << "\n";
           }
           indvar->addIncoming(incr, header2latch[header]);

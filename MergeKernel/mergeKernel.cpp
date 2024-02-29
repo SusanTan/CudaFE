@@ -24,6 +24,7 @@ namespace {
 class KernelProfile{
   public:
   std::vector<Value*> loopDims;
+  std::map<Value*, int> dim2classify; //0: no meaning 1:outermost loop of grid 2:outermost loop of block
   BasicBlock *kernelBB = nullptr;
   Function *deviceKernel = nullptr;
   CallInst *kernelCall = nullptr;
@@ -36,7 +37,7 @@ struct MergeKernel : public ModulePass {
   int mdID = 0;
   MergeKernel() : ModulePass(ID) {}
 
-  void findThreadDim(KernelProfile *kernelProfile, Function &F, LoadInst *DimArg, bool blockOrGrid){
+  void findThreadDim(KernelProfile *kernelProfile, Function &F, LoadInst *DimArg, bool isBlockDim){
     //LoadInst *DimArg = dyn_cast<LoadInst>(CI->getArgOperand(2));
     assert(DimArg && "mergeKernel: DimArg is not a load inst\n");
     GetElementPtrInst *ArgGep = dyn_cast<GetElementPtrInst>(DimArg->getOperand(0));
@@ -79,6 +80,19 @@ struct MergeKernel : public ModulePass {
         //    continue;
         //  }
         kernelProfile->loopDims.push_back(dim);
+        if(isBlockDim){
+          if(i==1)
+            kernelProfile->dim2classify[dim] = 2;
+          else
+            kernelProfile->dim2classify[dim] = 0;
+        }
+        else{
+          if(i==1)
+            kernelProfile->dim2classify[dim] = 1;
+          else
+            kernelProfile->dim2classify[dim] = 0;
+        }
+
         errs() << "mergeKernel: Dim " << i << " : " << *dim <<"\n";
       }
 
@@ -119,6 +133,18 @@ struct MergeKernel : public ModulePass {
           //  if(dimConst->getZExtValue() == 1)
           //    continue;
           kernelProfile->loopDims.push_back(dim);
+          if(isBlockDim){
+            if(i==1)
+              kernelProfile->dim2classify[dim] = 2;
+            else
+              kernelProfile->dim2classify[dim] = 0;
+          }
+          else{
+            if(i==1)
+              kernelProfile->dim2classify[dim] = 1;
+            else
+              kernelProfile->dim2classify[dim] = 0;
+          }
         }
         foundDim = true;
         break;
@@ -237,6 +263,7 @@ struct MergeKernel : public ModulePass {
             if(isa<ConstantInt>(CI->getArgOperand(0))){
               Value *dim = CI->getArgOperand(0);
               kernelProfiles[CI]->loopDims.push_back(dim);
+              kernelProfiles[CI]->dim2classify[dim] = 1;
             }
             else{
               findThreadDim(kernelProfiles[CI], *F, dyn_cast<LoadInst>(CI->getArgOperand(0)), false);
@@ -246,6 +273,7 @@ struct MergeKernel : public ModulePass {
             if(isa<ConstantInt>(CI->getArgOperand(2))){
               Value *dim = CI->getArgOperand(2);
               kernelProfiles[CI]->loopDims.push_back(dim);
+              kernelProfiles[CI]->dim2classify[dim] = 2;
             }
             else{
               findThreadDim(kernelProfiles[CI], *F, dyn_cast<LoadInst>(CI->getArgOperand(2)), true);
@@ -529,8 +557,12 @@ struct MergeKernel : public ModulePass {
           auto header = BasicBlock::Create(kernelBB->getContext(), "header." + std::to_string(loopCnt), F, kernelBB);
           headerNests.push(header);
           header2itNum[header] = itNum;
-          if(loopCnt == 0)
+          if(loopCnt == 0){
             auto br = BranchInst::Create(header, pred);
+          //  LLVMContext& C = term->getContext();
+          //  MDNode* N = MDNode::get(C, MDString::get(C, ""));
+          //  term->setMetadata("splendid.doall.loop", N);
+          }
           pred = header;
           loopCnt++;
           lastheader = header;
@@ -577,11 +609,6 @@ struct MergeKernel : public ModulePass {
                                     "indvar.next." + std::to_string(i), latch->getTerminator());
 
           //TODO: figure out why i need getName empty
-          errs() << "mergeKernel: nextHeader: "<< nextHeader << "\n";
-          errs() << "mergeKernel: prevHeader: "<< prevHeader << "\n";
-          errs() << "mergeKernel: loopExit: "<< loopExit << "\n";
-          errs() << "mergeKernel: cmp: "<< cmp << "\n";
-          errs() << "mergeKernel: header: "<< header << "\n";
 
           //a single loop
           if(!nextHeader && !prevHeader){
@@ -601,10 +628,12 @@ struct MergeKernel : public ModulePass {
             indvar->addIncoming(ConstantInt::get(phiTy,0), nextHeader);
           }
 
-          if(i == 0){
+          if(kernelProfile->dim2classify[header2itNum[header]] == 1 ||
+              kernelProfile->dim2classify[header2itNum[header]] == 2){
             LLVMContext& C = term->getContext();
             MDNode* N = MDNode::get(C, MDString::get(C, ""));
             term->setMetadata("splendid.doall.loop", N);
+            errs() << "mergeKernel: create metadata" << *term << "\n";
           }
           indvar->addIncoming(incr, header2latch[header]);
           prevHeader = header;

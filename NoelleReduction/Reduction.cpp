@@ -22,20 +22,50 @@
 #include <algorithm>
 
 #include "noelle/core/Noelle.hpp"
-using namespace llvm;
+using namespace llvm::noelle;
 
 namespace {
 struct NoelleReduction : public ModulePass {
   static char ID;
   NoelleReduction() : ModulePass(ID) {}
 
-  bool runOnModule(Module &M) override {
+  bool doInitialization (Module &M) override {
     return false;
+  }
+
+  bool runOnModule(Module &M) override {
+      /*
+       * Fetch NOELLE
+       */
+      auto& noelle = getAnalysis<Noelle>();
+
+      /*
+       * Fetch the PDG
+       */
+      auto PDG = noelle.getProgramDependenceGraph();
+
+      /*
+       * Fetch the FDG of "main"
+       */
+      auto fm = noelle.getFunctionsManager();
+      auto mainF = fm->getEntryFunction();
+      auto FDG = noelle.getFunctionDependenceGraph(mainF);
+
+      /*
+       * Compute the SCCDAG of the FDG of "main"
+       */
+      auto mainSCCDAG = new SCCDAG(FDG);
+
+      return false;
+  }
+
+  void getAnalysisUsage(AnalysisUsage &AU) const override {
+    AU.addRequired<Noelle>();
   }
 }; // end of struct Hello
 }  // end of anonymous namespace
 
 char NoelleReduction::ID = 0;
-static RegisterPass<NoelleReduction> X("noelle-reduction", "Use noelle's reduction pass to mark reduction objections",
+static RegisterPass<NoelleReduction> X("noelle-reduction", "Use noelle reduction pass to mark reduction objections",
                              false /* Only looks at CFG */,
                              false /* Analysis Pass */);

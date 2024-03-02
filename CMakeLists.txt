@@ -25,3 +25,4 @@ list(APPEND TVM_LINKER_LIBS LLVM)
 #llvm_map_components_to_libnames(llvm_libs passes)
 
 add_subdirectory(MergeKernel)
+add_subdirectory(NoelleReduction)

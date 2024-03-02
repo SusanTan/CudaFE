@@ -19,6 +19,7 @@ SET(CMAKE_CXX_FLAGS "-Wall -fno-rtti")
 separate_arguments(LLVM_DEFINITIONS_LIST NATIVE_COMMAND ${LLVM_DEFINITIONS})
 add_definitions(${LLVM_DEFINITIONS_LIST})
 include_directories(${LLVM_INCLUDE_DIRS})
+include_directories(/u/zujunt/noelle-workspace/noelle/install/include /u/zujunt/noelle-workspace/noelle/install/install/include/svf)
 list(APPEND TVM_LINKER_LIBS LLVM)
 # this is very important, to link with the passes library
 #llvm_map_components_to_libnames(llvm_libs passes)

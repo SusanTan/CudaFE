@@ -8,6 +8,7 @@
 #include "llvm/IR/CallSite.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Analysis/CFG.h"
+#include "llvm/Analysis/LoopInfo.h"
 
 
 #include <set>
@@ -34,6 +35,11 @@ struct NoelleReduction : public ModulePass {
     return false;
   }
 
+  void getAnalysisUsage(AnalysisUsage &AU) const override {
+    AU.addRequired<LoopInfoWrapperPass>();
+    AU.addRequired<Noelle>();
+  }
+
   bool runOnModule(Module &M) override {
       /*
        * Fetch NOELLE
@@ -45,51 +51,37 @@ struct NoelleReduction : public ModulePass {
        */
       auto PDG = noelle.getProgramDependenceGraph();
 
-      /*
-       * Fetch the FDG of "main"
-       */
-      auto fm = noelle.getFunctionsManager();
-      auto mainF = fm->getEntryFunction();
-      auto FDG = noelle.getFunctionDependenceGraph(mainF);
 
-
-
-      /*
-       * Compute the SCCDAG of the FDG of "main"
-       */
-      auto sccdag = new SCCDAG(FDG);
-
-      /*
-       * fetch the loops with all their abstractions
-       * (e.g., loop dependence graph, sccdag)
-       */
-      auto loopStructures = noelle.getLoopStructures();
-
-      for (auto l : *loopStructures) {
-        /*
-         * Get the LoopDependenceInfo
-         */
-        auto LDI = noelle.getLoop(l);
-        /*
-         * Fetch the SCC manager.
-         */
-        auto sccManager = LDI->getSCCManager();
-        for (auto sccNode : sccdag->getNodes()) {
-          auto scc = sccNode->getT();
-          auto sccInfo = sccManager->getSCCAttrs(scc);
-          if (sccInfo && isa<ReductionSCC>(sccInfo))
-            scc->print(errs());
+      for (Module::iterator FI = M.begin(), FE = M.end(); FI != FE; ++FI) {
+        Function *F = &*FI;
+        if(F->isDeclaration()) continue;
+        auto FDG = noelle.getFunctionDependenceGraph(F);
+        auto &LI = getAnalysis<LoopInfoWrapperPass>(*F).getLoopInfo();
+        for (auto l : LI.getLoopsInPreorder()) {
+          auto LDG = FDG->createLoopsSubgraph(l);
+          auto ls = new LoopStructure(l);
+          auto LDI = noelle.getLoop(ls);
+          auto sccManager = LDI->getSCCManager();
+          auto sccdag = new SCCDAG(FDG);
+          for (auto sccNode : sccdag->getNodes()) {
+            auto scc = sccNode->getT();
+            auto sccInfo = sccManager->getSCCAttrs(scc);
+            if(sccInfo){
+              errs() << "SUSAN: reduction\n";
+              scc->print(errs());
+            }
+            if (sccInfo && isa<ReductionSCC>(sccInfo)){
+              errs() << "SUSAN: found reduction scc\n";
+              scc->print(errs());
+            }
+          }
         }
       }
-
-
 
       return false;
   }
 
-  void getAnalysisUsage(AnalysisUsage &AU) const override {
-    AU.addRequired<Noelle>();
-  }
+
 }; // end of struct Hello
 }  // end of anonymous namespace
 

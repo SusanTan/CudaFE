@@ -507,20 +507,20 @@ struct MergeKernel : public ModulePass {
             mode->isOne()? dest = dyn_cast<Instruction>(CI->getArgOperand(0)) :
                            dest = dyn_cast<Instruction>(CI->getArgOperand(1));
             LLVMContext& C = NewCI->getContext();
-            std::string mdDevice = "splendid.target.mapdata";
+            std::string mdDevice = "tulip.target.mapdata";
             MDNode *mdSize = nullptr;
             if(Instruction* sizeInst = dyn_cast<Instruction>(cpySize)){
-              std::string mdDataSize = "splendid.target.datasize";
+              std::string mdDataSize = "tulip.target.datasize";
               mdSize = MDNode::get(C, MDString::get(C, std::to_string(mdID)));
-              sizeInst->setMetadata("splendid.target.datasize", mdSize);
+              sizeInst->setMetadata("tulip.target.datasize", mdSize);
               mdID++;
             }
 
             MDNode* N;
             mdSize ? N = MDNode::get(C, mdSize) :
                      N = MDNode::get(C, ValueAsMetadata::get(dyn_cast<ConstantInt>(cpySize)));
-            mode->isOne() ? dest->setMetadata("splendid.target.mapdata.to", N) :
-                            dest->setMetadata("splendid.target.mapdata.from", N);
+            mode->isOne() ? dest->setMetadata("tulip.target.mapdata.to", N) :
+                            dest->setMetadata("tulip.target.mapdata.from", N);
             insts2Remove.push_back(CI);
           }
           else if(calledFunc->getName().contains("cudaDeviceSynchronize")){
@@ -633,9 +633,9 @@ struct MergeKernel : public ModulePass {
             LLVMContext& C = term->getContext();
             MDNode* N = MDNode::get(C, MDString::get(C, ""));
             if(kernelProfile->dim2classify[header2itNum[header]] == 1)
-              term->setMetadata("splendid.doall.loop.grid", N);
+              term->setMetadata("tulip.doall.loop.grid", N);
             if(kernelProfile->dim2classify[header2itNum[header]] == 2)
-              term->setMetadata("splendid.doall.loop.block", N);
+              term->setMetadata("tulip.doall.loop.block", N);
             errs() << "mergeKernel: create metadata" << *term << "\n";
           }
           indvar->addIncoming(incr, header2latch[header]);

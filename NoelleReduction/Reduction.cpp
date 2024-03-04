@@ -23,6 +23,7 @@
 #include <algorithm>
 #include "noelle/core/Noelle.hpp"
 #include "noelle/core/ReductionSCC.hpp"
+#include "noelle/core/BinaryReductionSCC.hpp"
 
 using namespace llvm::noelle;
 
@@ -60,20 +61,37 @@ struct NoelleReduction : public ModulePass {
         for (auto l : LI.getLoopsInPreorder()) {
           auto LDG = FDG->createLoopsSubgraph(l);
           auto ls = new LoopStructure(l);
-          auto LDI = noelle.getLoop(ls);
+          auto optimizations = {
+            LoopDependenceInfoOptimization::MEMORY_CLONING_ID,
+            LoopDependenceInfoOptimization::THREAD_SAFE_LIBRARY_ID
+          };
+          auto LDI = noelle.getLoop(ls, optimizations);
+          auto loopPreHeader = ls->getPreHeader();
           auto sccManager = LDI->getSCCManager();
-          auto sccdag = new SCCDAG(FDG);
-          for (auto sccNode : sccdag->getNodes()) {
-            auto scc = sccNode->getT();
-            auto sccInfo = sccManager->getSCCAttrs(scc);
-            if(sccInfo){
-              errs() << "SUSAN: reduction\n";
-              scc->print(errs());
-            }
-            if (sccInfo && isa<ReductionSCC>(sccInfo)){
-              errs() << "SUSAN: found reduction scc\n";
-              scc->print(errs());
-            }
+          auto loopSCCDAG = sccManager->getSCCDAG();
+          /*
+           * Fetch the environment of the loop
+           */
+          auto environment = LDI->getEnvironment();
+          assert(environment != nullptr);
+          /*
+           * Collect reduction operation information needed to accumulate reducable
+           * variables after parallelization execution
+           */
+          std::unordered_map<uint32_t, Instruction::BinaryOps> reducableBinaryOps;
+          std::unordered_map<uint32_t, Value *> initialValues;
+          for (auto envID : environment->getEnvIDsOfLiveOutVars()) {
+            /*
+             * Collect information about the reduction
+             */
+            auto producer = environment->getProducer(envID);
+            errs() << "SUSAN: reduction : " << *producer << "\n";
+            auto producerSCC = loopSCCDAG->sccOfValue(producer);
+            auto producerSCCAttributes =
+                dyn_cast<BinaryReductionSCC>(sccManager->getSCCAttrs(producerSCC));
+            // assert(producerSCCAttributes != nullptr);
+            if (!producerSCCAttributes)
+              continue;
           }
         }
       }

@@ -24,6 +24,7 @@
 #include "noelle/core/Noelle.hpp"
 #include "noelle/core/ReductionSCC.hpp"
 #include "noelle/core/BinaryReductionSCC.hpp"
+#include "llvm/IR/Metadata.h"
 
 using namespace llvm::noelle;
 
@@ -74,6 +75,7 @@ struct NoelleReduction : public ModulePass {
            */
           auto environment = LDI->getEnvironment();
           assert(environment != nullptr);
+          //SUSAN: logic pulled from noelle/src/tools/parallelization_technique/src/ParallelizationTechnique.cpp
           /*
            * Collect reduction operation information needed to accumulate reducable
            * variables after parallelization execution
@@ -81,17 +83,58 @@ struct NoelleReduction : public ModulePass {
           std::unordered_map<uint32_t, Instruction::BinaryOps> reducableBinaryOps;
           std::unordered_map<uint32_t, Value *> initialValues;
           for (auto envID : environment->getEnvIDsOfLiveOutVars()) {
-            /*
-             * Collect information about the reduction
-             */
-            auto producer = environment->getProducer(envID);
-            errs() << "SUSAN: reduction : " << *producer << "\n";
+
+            Instruction *producer = dyn_cast<Instruction>(environment->getProducer(envID));
             auto producerSCC = loopSCCDAG->sccOfValue(producer);
             auto producerSCCAttributes =
                 dyn_cast<BinaryReductionSCC>(sccManager->getSCCAttrs(producerSCC));
-            // assert(producerSCCAttributes != nullptr);
             if (!producerSCCAttributes)
               continue;
+            errs() << "SUSAN??\n";
+            auto initialValue = producerSCCAttributes->getInitialValue();
+            auto reduceOp = producerSCCAttributes->getReductionOperation();
+            LLVMContext& C = producer->getContext();
+            MDNode* N = MDNode::get(C, MDString::get(C, ""));
+            switch (reduceOp) {
+              case Instruction::Add:
+              case Instruction::FAdd:
+                producer->setMetadata("tulip.reduce.add", N);
+                break;
+              case Instruction::Sub:
+              case Instruction::FSub:
+                producer->setMetadata("tulip.reduce.sub", N);
+                break;
+              case Instruction::Mul:
+              case Instruction::FMul:
+                producer->setMetadata("tulip.reduce.mul", N);
+                break;
+              case Instruction::UDiv:
+              case Instruction::SDiv:
+              case Instruction::FDiv:
+                producer->setMetadata("tulip.reduce.div", N);
+                break;
+              case Instruction::URem:
+              case Instruction::SRem:
+              case Instruction::FRem:
+                producer->setMetadata("tulip.reduce.rem", N);
+                break;
+              case Instruction::Shl:
+                producer->setMetadata("tulip.reduce.shl", N);
+                break;
+              case Instruction::LShr:
+              case Instruction::AShr:
+                producer->setMetadata("tulip.reduce.shr", N);
+                break;
+              case Instruction::And:
+                producer->setMetadata("tulip.reduce.and", N);
+                break;
+              case Instruction::Or:
+                producer->setMetadata("tulip.reduce.or", N);
+                break;
+              case Instruction::Xor:
+                producer->setMetadata("tulip.reduce.xor", N);
+                break;
+            }
           }
         }
       }

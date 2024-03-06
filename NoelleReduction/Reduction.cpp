@@ -25,6 +25,7 @@
 #include "noelle/core/ReductionSCC.hpp"
 #include "noelle/core/BinaryReductionSCC.hpp"
 #include "llvm/IR/Metadata.h"
+#include "Parallelizer.hpp"
 
 using namespace llvm::noelle;
 
@@ -40,19 +41,25 @@ struct NoelleReduction : public ModulePass {
   void getAnalysisUsage(AnalysisUsage &AU) const override {
     AU.addRequired<LoopInfoWrapperPass>();
     AU.addRequired<Noelle>();
+    AU.addRequired<HeuristicsPass>();
   }
 
   bool runOnModule(Module &M) override {
       /*
-       * Fetch NOELLE
+       * Fetch NOELLE & heuristics
        */
       auto& noelle = getAnalysis<Noelle>();
+      auto heuristics = getAnalysis<HeuristicsPass>().getHeuristics(noelle);
 
       /*
        * Fetch the PDG
        */
       auto PDG = noelle.getProgramDependenceGraph();
 
+      /*
+       * Allocate the parallelization techniques.
+       */
+      DOALL doall{ noelle };
 
       for (Module::iterator FI = M.begin(), FE = M.end(); FI != FE; ++FI) {
         Function *F = &*FI;
@@ -135,6 +142,15 @@ struct NoelleReduction : public ModulePass {
                 producer->setMetadata("tulip.reduce.xor", N);
                 break;
             }
+          }
+
+
+          // Apply DOALL
+          auto ltm = LDI->getLoopTransformationsManager();
+          if (true && noelle.isTransformationEnabled(DOALL_ID)
+              && ltm->isTransformationEnabled(DOALL_ID)
+              && doall.canBeAppliedToLoop(LDI, heuristics)) {
+            errs() << "SUSAN: DOALL can be applied\n";
           }
         }
       }

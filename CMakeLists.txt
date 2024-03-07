@@ -26,3 +26,4 @@ list(APPEND TVM_LINKER_LIBS LLVM)
 
 add_subdirectory(MergeKernel)
 add_subdirectory(NoelleReduction)
+add_subdirectory(NoelleDOALL)

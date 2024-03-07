@@ -50,6 +50,7 @@ struct NoelleReduction : public ModulePass {
        */
       auto& noelle = getAnalysis<Noelle>();
       auto heuristics = getAnalysis<HeuristicsPass>().getHeuristics(noelle);
+      auto mm = noelle.getMetadataManager();
 
       /*
        * Fetch the PDG
@@ -97,7 +98,6 @@ struct NoelleReduction : public ModulePass {
                 dyn_cast<BinaryReductionSCC>(sccManager->getSCCAttrs(producerSCC));
             if (!producerSCCAttributes)
               continue;
-            errs() << "SUSAN??\n";
             auto initialValue = producerSCCAttributes->getInitialValue();
             auto reduceOp = producerSCCAttributes->getReductionOperation();
             LLVMContext& C = producer->getContext();
@@ -150,7 +150,7 @@ struct NoelleReduction : public ModulePass {
           if (true && noelle.isTransformationEnabled(DOALL_ID)
               && ltm->isTransformationEnabled(DOALL_ID)
               && doall.canBeAppliedToLoop(LDI, heuristics)) {
-            errs() << "SUSAN: DOALL can be applied\n";
+            mm->addMetadata(ls, "noelle.doall.loop", std::to_string(0));
           }
         }
       }

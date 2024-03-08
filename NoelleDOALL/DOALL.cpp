@@ -137,7 +137,6 @@ struct NoelleDOALL : public ModulePass {
       std::unordered_map<BasicBlock *, bool> modifiedBBs{};
       uint32_t parallelizedIndex = 0;
       for (auto indexLoopPair : loopParallelizationOrder) {
-        errs() << "SUSAN???\n";
         auto ldi = indexLoopPair.second;
         auto ls = ldi->getLoopStructure();
         auto loopIDOpt = ls->getID();

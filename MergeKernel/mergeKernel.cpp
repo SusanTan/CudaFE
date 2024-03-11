@@ -305,6 +305,7 @@ struct MergeKernel : public ModulePass {
             if(device2newFunc.find(deviceKernel) != device2newFunc.end()){
               auto newFunc = device2newFunc[deviceKernel];
               kernelProfiles[CI]->newFunc = newFunc;
+              insts2Remove.push_back(CI);
               continue;
             }
 
@@ -462,15 +463,15 @@ struct MergeKernel : public ModulePass {
             insts2Remove.push_back(CI);
           }
           else if(calledFunc->getName().contains("cudaMalloc") && calledFunc->getName() != "cudaMalloc"){
-            auto devDataPtr = CI->getArgOperand(0);
-            auto AllocSize = CI->getArgOperand(1);
-            PointerType* Ty = dyn_cast<PointerType>(devDataPtr->getType());
-            PointerType* points2Ty = dyn_cast<PointerType>(Ty->getPointerElementType());
-            Instruction* Malloc = CallInst::CreateMalloc(CI,
-                                               AllocSize->getType(), points2Ty->getPointerElementType(), AllocSize,
-                                               nullptr, nullptr, "");
-            new StoreInst(Malloc, devDataPtr, CI);
-            errs() << "mergeKernel: replaced cuda malloc with: " << *Malloc << "\n";
+            //auto devDataPtr = CI->getArgOperand(0);
+            //auto AllocSize = CI->getArgOperand(1);
+            //PointerType* Ty = dyn_cast<PointerType>(devDataPtr->getType());
+            //PointerType* points2Ty = dyn_cast<PointerType>(Ty->getPointerElementType());
+            //Instruction* Malloc = CallInst::CreateMalloc(CI,
+            //                                   AllocSize->getType(), points2Ty->getPointerElementType(), AllocSize,
+            //                                   nullptr, nullptr, "");
+            //new StoreInst(Malloc, devDataPtr, CI);
+            //errs() << "mergeKernel: replaced cuda malloc with: " << *Malloc << "\n";
 
             funcs2delete.insert(calledFunc);
             //for (inst_iterator I = inst_begin(F), E = inst_end(F); I != E; ++I) {
@@ -483,36 +484,36 @@ struct MergeKernel : public ModulePass {
             insts2Remove.push_back(CI);
           }
           else if(calledFunc->getName().contains("cudaMemcpy")){
-            errs() << "mergeKernel: cudaMemcpy: " << *CI << "\n";
-            Type* Int1Ty = Type::getInt1Ty(F->getContext());
-            CallSite CS(CI);
-            SmallVector<Value *, 4> Args(CS.arg_begin(), CS.arg_end()-1);
-            Args.push_back(ConstantInt::getFalse(Int1Ty));
-            ArrayRef<Value*> args(Args);
-            std::vector<Type*> argTyVec;
-            argTyVec.push_back(PointerType::get(Type::getInt8Ty(F->getContext()), 0));
-            argTyVec.push_back(PointerType::get(Type::getInt8Ty(F->getContext()), 0));
-            argTyVec.push_back(Type::getInt64Ty(F->getContext()));
-            argTyVec.push_back(Int1Ty);
-            ArrayRef<Type *> argTys(argTyVec);
-            FunctionType* memcpyFuncTy = FunctionType::get(
-                Type::getVoidTy(F->getContext()), //return type
-                argTys,
-                false
-            );
-
-            auto MemCpyFunc = F->getParent()->getOrInsertFunction("llvm.memcpy.p0i8.p0i8.i64", memcpyFuncTy);
-            CallInst *NewCI = CallInst::Create(MemCpyFunc, args, "", CI);
-
-            //add metadata to identify omp target mapping
-            //Instruction* src = CI->getArgOperand(1);
-            Value* cpySize = CI->getArgOperand(2);
             ConstantInt* mode = dyn_cast<ConstantInt>(CI->getArgOperand(3));
-            Instruction* dest = nullptr;
-            mode->isOne()? dest = dyn_cast<Instruction>(CI->getArgOperand(0)) :
-                           dest = dyn_cast<Instruction>(CI->getArgOperand(1));
-            LLVMContext& C = NewCI->getContext();
-            std::string mdDevice = "tulip.target.mapdata";
+            Instruction* originalBitcast = nullptr;
+            mode->isOne()? originalBitcast = dyn_cast<BitCastInst>(CI->getArgOperand(1)) :
+                           originalBitcast = dyn_cast<BitCastInst>(CI->getArgOperand(0));
+            Instruction* devBitcast = nullptr;
+            mode->isOne()? devBitcast = dyn_cast<BitCastInst>(CI->getArgOperand(0)) :
+                           devBitcast = dyn_cast<BitCastInst>(CI->getArgOperand(1));
+            assert(originalBitcast && devBitcast && "mergeKernel: didn't find bitcast from cudaMemcpy!\n");
+            LoadInst *devLd = dyn_cast<LoadInst>(devBitcast->getOperand(0));
+            LoadInst *originalLd = dyn_cast<LoadInst>(originalBitcast->getOperand(0));
+            assert(originalLd && devLd && "mergeKernel: didn't find load from cudaMemcpy!\n");
+            AllocaInst *devAlloc = dyn_cast<AllocaInst>(devLd->getOperand(0));
+            AllocaInst *originalAlloc = dyn_cast<AllocaInst>(originalLd->getOperand(0));
+            assert(devAlloc && originalAlloc && "mergeKernel: didn't find alloca from cudaMemcpy!\n");
+            std::map<AllocaInst*, LoadInst>originalAlloc2newLD;
+            auto newLd = new LoadInst(cast<PointerType>(originalAlloc->getType())->getElementType(), originalAlloc, "ldHost", originalLd);
+            for(auto user : devAlloc->users()){
+              if(LoadInst *ld = dyn_cast<LoadInst>(user)){
+                for(auto user : ld->users()){
+                  Instruction* UI = dyn_cast<Instruction>(user);
+                  for (auto OI = UI->op_begin(), OE = UI->op_end(); OI != OE; ++OI){
+                    Value *val = *OI;
+                    if(val == ld)
+                      *OI = newLd;
+                  }
+                }
+              }
+            }
+            Value* cpySize = CI->getArgOperand(2);
+            LLVMContext &C = newLd->getContext();
             MDNode *mdSize = nullptr;
             if(Instruction* sizeInst = dyn_cast<Instruction>(cpySize)){
               std::string mdDataSize = "tulip.target.datasize";
@@ -524,9 +525,52 @@ struct MergeKernel : public ModulePass {
             MDNode* N;
             mdSize ? N = MDNode::get(C, mdSize) :
                      N = MDNode::get(C, ValueAsMetadata::get(dyn_cast<ConstantInt>(cpySize)));
-            mode->isOne() ? dest->setMetadata("tulip.target.mapdata.to", N) :
-                            dest->setMetadata("tulip.target.mapdata.from", N);
+            mode->isOne() ? newLd->setMetadata("tulip.target.mapdata.to", N) :
+                            newLd->setMetadata("tulip.target.mapdata.from", N);
             insts2Remove.push_back(CI);
+            //errs() << "mergeKernel: cudaMemcpy: " << *CI << "\n";
+            //Type* Int1Ty = Type::getInt1Ty(F->getContext());
+            //CallSite CS(CI);
+            //SmallVector<Value *, 4> Args(CS.arg_begin(), CS.arg_end()-1);
+            //Args.push_back(ConstantInt::getFalse(Int1Ty));
+            //ArrayRef<Value*> args(Args);
+            //std::vector<Type*> argTyVec;
+            //argTyVec.push_back(PointerType::get(Type::getInt8Ty(F->getContext()), 0));
+            //argTyVec.push_back(PointerType::get(Type::getInt8Ty(F->getContext()), 0));
+            //argTyVec.push_back(Type::getInt64Ty(F->getContext()));
+            //argTyVec.push_back(Int1Ty);
+            //ArrayRef<Type *> argTys(argTyVec);
+            //FunctionType* memcpyFuncTy = FunctionType::get(
+            //    Type::getVoidTy(F->getContext()), //return type
+            //    argTys,
+            //    false
+            //);
+
+            //auto MemCpyFunc = F->getParent()->getOrInsertFunction("llvm.memcpy.p0i8.p0i8.i64", memcpyFuncTy);
+            //CallInst *NewCI = CallInst::Create(MemCpyFunc, args, "", CI);
+
+            ////add metadata to identify omp target mapping
+            ////Instruction* src = CI->getArgOperand(1);
+            //Value* cpySize = CI->getArgOperand(2);
+            //ConstantInt* mode = dyn_cast<ConstantInt>(CI->getArgOperand(3));
+            //Instruction* dest = nullptr;
+            //mode->isOne()? dest = dyn_cast<Instruction>(CI->getArgOperand(0)) :
+            //               dest = dyn_cast<Instruction>(CI->getArgOperand(1));
+            //LLVMContext& C = NewCI->getContext();
+            //std::string mdDevice = "tulip.target.mapdata";
+            //MDNode *mdSize = nullptr;
+            //if(Instruction* sizeInst = dyn_cast<Instruction>(cpySize)){
+            //  std::string mdDataSize = "tulip.target.datasize";
+            //  mdSize = MDNode::get(C, MDString::get(C, std::to_string(mdID)));
+            //  sizeInst->setMetadata("tulip.target.datasize", mdSize);
+            //  mdID++;
+            //}
+
+            //MDNode* N;
+            //mdSize ? N = MDNode::get(C, mdSize) :
+            //         N = MDNode::get(C, ValueAsMetadata::get(dyn_cast<ConstantInt>(cpySize)));
+            //mode->isOne() ? dest->setMetadata("tulip.target.mapdata.to", N) :
+            //                dest->setMetadata("tulip.target.mapdata.from", N);
           }
           else if(calledFunc->getName().contains("cudaDeviceSynchronize")){
             insts2Remove.push_back(CI);

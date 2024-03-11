@@ -34,6 +34,7 @@ class KernelProfile{
 struct MergeKernel : public ModulePass {
   static char ID;
   std::set<Function*>funcs2delete;
+  std::map<Function*, Function*> device2newFunc;
   int mdID = 0;
   MergeKernel() : ModulePass(ID) {}
 
@@ -301,7 +302,11 @@ struct MergeKernel : public ModulePass {
               }
             }
             errs() << "MergeKernel: found deviceKernel: " << *deviceKernel << "\n";
-
+            if(device2newFunc.find(deviceKernel) != device2newFunc.end()){
+              auto newFunc = device2newFunc[deviceKernel];
+              kernelProfiles[CI]->newFunc = newFunc;
+              continue;
+            }
 
 
             //create a new function for kernel
@@ -324,6 +329,7 @@ struct MergeKernel : public ModulePass {
                   deviceKernel->getParent()
                 );
             newFunc = kernelProfiles[CI]->newFunc;
+            device2newFunc[deviceKernel] = newFunc;
             deviceKernel->setSubprogram(nullptr);
 
             //copy old kernel over to the new
@@ -453,7 +459,6 @@ struct MergeKernel : public ModulePass {
               errs() << "mergeKernel: what does I belong to?" <<  I->getParent()->getName();
               I->eraseFromParent();
             }
-            errs() << "MergeKernel: newFunc is" << *newFunc << "\n";
             insts2Remove.push_back(CI);
           }
           else if(calledFunc->getName().contains("cudaMalloc") && calledFunc->getName() != "cudaMalloc"){

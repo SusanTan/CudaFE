@@ -189,8 +189,8 @@ struct MergeKernel : public ModulePass {
             }
         }
         else if(calledFunc->getName().contains("cudaFree")){
-            auto ptr = CI->getArgOperand(0);
-            CallInst::CreateFree(ptr, CI);
+           // auto ptr = CI->getArgOperand(0);
+           // CallInst::CreateFree(ptr, CI);
             insts2Remove.push_back(CI);
         }
         else if(calledFunc->getName().contains("cudaConfigureCall")){

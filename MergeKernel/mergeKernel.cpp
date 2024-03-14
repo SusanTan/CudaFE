@@ -500,6 +500,35 @@ struct MergeKernel : public ModulePass {
             assert(devAlloc && originalAlloc && "mergeKernel: didn't find alloca from cudaMemcpy!\n");
             std::map<AllocaInst*, LoadInst>originalAlloc2newLD;
             auto newLd = new LoadInst(cast<PointerType>(originalAlloc->getType())->getElementType(), originalAlloc, "ldHost", originalLd);
+            Value* cpySize = nullptr;
+            errs() << "mergeKernel: found originalAlloc " << *originalAlloc << "\n";
+            for(auto user : originalAlloc->users()){
+              errs() << "mergeKernel: found originalAlloc user" << *user << "\n";
+              if(StoreInst *st = dyn_cast<StoreInst>(user)){
+                errs() << "mergeKernel: found originalAlloc store:" << *st << "\n";
+                if(BitCastInst* cast = dyn_cast<BitCastInst>(st->getOperand(0))){
+                  errs() << "mergeKernel: found originalAlloc cast:" << *cast << "\n";
+                  if(CallInst* ci = dyn_cast<CallInst>(cast->getOperand(0))){
+                    errs() << "mergeKernel: found originalAlloc ci:" << *ci << "\n";
+                    if(!ci->getCalledFunction()->getName().contains("malloc")) continue;
+                    cpySize = ci->getArgOperand(0);
+                    LLVMContext &C = cpySize->getContext();
+                    MDNode *mdSize = nullptr;
+                    if(Instruction* sizeInst = dyn_cast<Instruction>(cpySize)){
+                      std::string mdDataSize = "tulip.target.datasize";
+                      mdSize = MDNode::get(C, MDString::get(C, std::to_string(mdID)));
+                      sizeInst->setMetadata("tulip.target.datasize", mdSize);
+                      mdID++;
+                    }
+                    MDNode* N;
+                    mdSize ? N = MDNode::get(C, mdSize) :
+                             N = MDNode::get(C, ValueAsMetadata::get(dyn_cast<ConstantInt>(cpySize)));
+                    mode->isOne() ? ci->setMetadata("tulip.target.mapdata.to", N) :
+                                    ci->setMetadata("tulip.target.mapdata.from", N);
+                  }
+                }
+              }
+            }
             for(auto user : devAlloc->users()){
               if(LoadInst *ld = dyn_cast<LoadInst>(user)){
                 for(auto user : ld->users()){
@@ -512,22 +541,18 @@ struct MergeKernel : public ModulePass {
                 }
               }
             }
-            Value* cpySize = CI->getArgOperand(2);
-            LLVMContext &C = newLd->getContext();
-            MDNode *mdSize = nullptr;
-            if(Instruction* sizeInst = dyn_cast<Instruction>(cpySize)){
-              std::string mdDataSize = "tulip.target.datasize";
-              mdSize = MDNode::get(C, MDString::get(C, std::to_string(mdID)));
-              sizeInst->setMetadata("tulip.target.datasize", mdSize);
-              mdID++;
-            }
 
-            MDNode* N;
-            mdSize ? N = MDNode::get(C, mdSize) :
-                     N = MDNode::get(C, ValueAsMetadata::get(dyn_cast<ConstantInt>(cpySize)));
-            mode->isOne() ? newLd->setMetadata("tulip.target.mapdata.to", N) :
-                            newLd->setMetadata("tulip.target.mapdata.from", N);
-            insts2Remove.push_back(CI);
+
+
+
+            if(mode->isOne())
+              insts2Remove.push_back(CI);
+            else{
+              //TODO: better to create an empty function that doesn't really do anything
+              LLVMContext &C = CI->getContext();
+              MDNode *N = MDNode::get(C, MDString::get(C,""));
+              CI->setMetadata("tulip.target.end.of.map", N);
+            }
             //errs() << "mergeKernel: cudaMemcpy: " << *CI << "\n";
             //Type* Int1Ty = Type::getInt1Ty(F->getContext());
             //CallSite CS(CI);

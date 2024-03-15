@@ -566,6 +566,15 @@ struct MergeKernel : public ModulePass {
               CI->setMetadata("tulip.target.start.of.map", N);
             }
             else{
+              bool foundMapRegion = false;
+              for(auto &I : *(CI->getParent())){
+                if(I.getMetadata("tulip.target.end.of.map")){
+                  foundMapRegion = true;
+                  insts2Remove.push_back(CI);
+                  break;
+                }
+              }
+              if(foundMapRegion) continue;
               LLVMContext &C = CI->getContext();
               MDNode *N = MDNode::get(C, MDString::get(C,""));
               CI->setMetadata("tulip.target.end.of.map", N);

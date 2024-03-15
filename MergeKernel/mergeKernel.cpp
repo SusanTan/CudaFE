@@ -503,6 +503,10 @@ struct MergeKernel : public ModulePass {
             Value* cpySize = nullptr;
             errs() << "mergeKernel: found originalAlloc " << *originalAlloc << "\n";
             for(auto user : originalAlloc->users()){
+              if(StoreInst *st = dyn_cast<StoreInst>(user)){
+              }
+            }
+            for(auto user : originalAlloc->users()){
               errs() << "mergeKernel: found originalAlloc user" << *user << "\n";
               if(StoreInst *st = dyn_cast<StoreInst>(user)){
                 errs() << "mergeKernel: found originalAlloc store:" << *st << "\n";
@@ -545,10 +549,23 @@ struct MergeKernel : public ModulePass {
 
 
 
-            if(mode->isOne())
-              insts2Remove.push_back(CI);
+            //TODO: better to create an empty function that doesn't really do anything
+            if(mode->isOne()){
+
+              bool foundMapRegion = false;
+              for(auto &I : *(CI->getParent())){
+                if(I.getMetadata("tulip.target.start.of.map")){
+                  foundMapRegion = true;
+                  insts2Remove.push_back(CI);
+                  break;
+                }
+              }
+              if(foundMapRegion) continue;
+              LLVMContext &C = CI->getContext();
+              MDNode *N = MDNode::get(C, MDString::get(C,""));
+              CI->setMetadata("tulip.target.start.of.map", N);
+            }
             else{
-              //TODO: better to create an empty function that doesn't really do anything
               LLVMContext &C = CI->getContext();
               MDNode *N = MDNode::get(C, MDString::get(C,""));
               CI->setMetadata("tulip.target.end.of.map", N);

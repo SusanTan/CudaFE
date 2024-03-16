@@ -25,6 +25,8 @@ class KernelProfile{
   public:
   std::vector<Value*> loopDims;
   std::map<Value*, int> dim2classify; //0: no meaning 1:outermost loop of grid 2:outermost loop of block
+  int gridLoopCnt = 0;
+  int blockLoopCnt = 0;
   BasicBlock *kernelBB = nullptr;
   Function *deviceKernel = nullptr;
   CallInst *kernelCall = nullptr;
@@ -82,12 +84,22 @@ struct MergeKernel : public ModulePass {
         //  }
         kernelProfile->loopDims.push_back(dim);
         if(isBlockDim){
+          bool isOne = false;
+          if(ConstantInt *constInt = dyn_cast<ConstantInt>(dim))
+            if(constInt->getSExtValue() == 1)
+              isOne = true;
+          if(!isOne) kernelProfile->blockLoopCnt ++;
           if(i==1)
             kernelProfile->dim2classify[dim] = 2;
           else
             kernelProfile->dim2classify[dim] = 0;
         }
         else{
+          bool isOne = false;
+          if(ConstantInt *constInt = dyn_cast<ConstantInt>(dim))
+            if(constInt->getSExtValue() == 1)
+              isOne = true;
+          if(!isOne) kernelProfile->gridLoopCnt ++;
           if(i==1)
             kernelProfile->dim2classify[dim] = 1;
           else
@@ -135,12 +147,22 @@ struct MergeKernel : public ModulePass {
           //    continue;
           kernelProfile->loopDims.push_back(dim);
           if(isBlockDim){
+            bool isOne = false;
+            if(ConstantInt *constInt = dyn_cast<ConstantInt>(dim))
+              if(constInt->getSExtValue() == 1)
+                isOne = true;
+            if(!isOne) kernelProfile->blockLoopCnt ++;
             if(i==1)
               kernelProfile->dim2classify[dim] = 2;
             else
               kernelProfile->dim2classify[dim] = 0;
           }
           else{
+            bool isOne = false;
+            if(ConstantInt *constInt = dyn_cast<ConstantInt>(dim))
+              if(constInt->getSExtValue() == 1)
+                isOne = true;
+            if(!isOne) kernelProfile->gridLoopCnt ++;
             if(i==1)
               kernelProfile->dim2classify[dim] = 1;
             else
@@ -265,6 +287,11 @@ struct MergeKernel : public ModulePass {
               Value *dim = CI->getArgOperand(0);
               kernelProfiles[CI]->loopDims.push_back(dim);
               kernelProfiles[CI]->dim2classify[dim] = 1;
+              bool isOne = false;
+              if(ConstantInt *constInt = dyn_cast<ConstantInt>(dim))
+                if(constInt->getSExtValue() == 1)
+                  isOne = true;
+              if(!isOne) kernelProfiles[CI]->gridLoopCnt ++;
             }
             else{
               findThreadDim(kernelProfiles[CI], *F, dyn_cast<LoadInst>(CI->getArgOperand(0)), false);
@@ -275,6 +302,11 @@ struct MergeKernel : public ModulePass {
               Value *dim = CI->getArgOperand(2);
               kernelProfiles[CI]->loopDims.push_back(dim);
               kernelProfiles[CI]->dim2classify[dim] = 2;
+              bool isOne = false;
+              if(ConstantInt *constInt = dyn_cast<ConstantInt>(dim))
+                if(constInt->getSExtValue() == 1)
+                  isOne = true;
+              if(!isOne) kernelProfiles[CI]->blockLoopCnt ++;
             }
             else{
               findThreadDim(kernelProfiles[CI], *F, dyn_cast<LoadInst>(CI->getArgOperand(2)), true);
@@ -732,10 +764,14 @@ struct MergeKernel : public ModulePass {
               kernelProfile->dim2classify[header2itNum[header]] == 2){
             LLVMContext& C = term->getContext();
             MDNode* N = MDNode::get(C, MDString::get(C, ""));
-            if(kernelProfile->dim2classify[header2itNum[header]] == 1)
-              term->setMetadata("tulip.doall.loop.grid", N);
-            if(kernelProfile->dim2classify[header2itNum[header]] == 2)
-              term->setMetadata("tulip.doall.loop.block", N);
+            if(kernelProfile->dim2classify[header2itNum[header]] == 1){
+              if(kernelProfile->gridLoopCnt > 1) term->setMetadata("tulip.doall.loop.grid.collapse", N);
+              else term->setMetadata("tulip.doall.loop.grid", N);
+            }
+            if(kernelProfile->dim2classify[header2itNum[header]] == 2){
+              if(kernelProfile->blockLoopCnt > 1) term->setMetadata("tulip.doall.loop.block.collapse", N);
+              else term->setMetadata("tulip.doall.loop.block", N);
+            }
             errs() << "mergeKernel: create metadata" << *term << "\n";
           }
           indvar->addIncoming(incr, header2latch[header]);

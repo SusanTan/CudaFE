@@ -191,6 +191,30 @@ struct MergeKernel : public ModulePass {
             funcs2delete.insert(calledFunc);
             insts2Remove.push_back(CI);
           }
+          else if (calledFunc->getName().contains("llvm.nvvm.sqrt")){
+            errs() << "mergeKernel: found nvvm sqrt declaration\n";
+            auto sqrtFuncTy = calledFunc->getFunctionType();
+            Function *F = Function::Create(sqrtFuncTy, Function::ExternalLinkage, "sqrt", M);
+            CallSite CS(CI);
+            SmallVector<Value *, 4> args(CS.arg_begin(), CS.arg_end());
+            auto sqrtFunc = F->getParent()->getOrInsertFunction("sqrt", sqrtFuncTy);
+            auto sqrtCall = CallInst::Create(
+                  sqrtFunc,
+                  args,
+                  "",
+                  CI
+                );
+            for(User *U : CI->users()){
+              Instruction *inst = dyn_cast<Instruction>(U);
+              if(!inst) continue;
+              for (auto OI = inst->op_begin(), OE = inst->op_end(); OI != OE; ++OI){
+                Value *val = *OI;
+                if(val == CI)
+                  *OI = sqrtCall;
+              }
+            }
+            insts2Remove.push_back(CI);
+          }
           else if(calledFunc->getName().contains("_ZN4dim3C2Ejjj")){
             funcs2delete.insert(calledFunc);
             insts2Remove.push_back(CI);
@@ -664,125 +688,126 @@ struct MergeKernel : public ModulePass {
 
       //create loops around kernel
       for(auto [configureCI, kernelProfile] : kernelProfiles){
-        std::stack<BasicBlock*> headerNests, headerNests2;
-        auto kernelBB = kernelProfile->kernelBB;
-        BasicBlock* pred = kernelBB->getSinglePredecessor();
-        std::vector<BasicBlock*> succs(succ_begin(kernelBB), succ_end(kernelBB));
-        auto term = dyn_cast<BranchInst>(pred->getTerminator());
-        assert(term && "mergeKernel: term is not a branch inst 206\n");
-        auto kernelPred = kernelBB->getSinglePredecessor();
-        assert(kernelPred && "mergeKernel: kernel has multiple predecessors\n");
-        insts2Remove.push_back(term);
-        Value *cond = nullptr;
-        if(term->isConditional())
-          cond = term->getCondition();
-        int loopCnt = 0;
-        BasicBlock *lastheader = nullptr;
-
-        //create headers
-        std::map<BasicBlock*, Value*>header2itNum;
-        auto loopDims = kernelProfile->loopDims;
-        for(auto itNum : loopDims){
-          if(ConstantInt *constInt = dyn_cast<ConstantInt>(itNum))
-            if(constInt->getSExtValue() == 1)
-              continue;
-          auto header = BasicBlock::Create(kernelBB->getContext(), "header." + std::to_string(loopCnt), F, kernelBB);
-          headerNests.push(header);
-          header2itNum[header] = itNum;
-          if(loopCnt == 0){
-            auto br = BranchInst::Create(header, pred);
-          //  LLVMContext& C = term->getContext();
-          //  MDNode* N = MDNode::get(C, MDString::get(C, ""));
-          //  term->setMetadata("splendid.doall.loop", N);
-          }
-          pred = header;
-          loopCnt++;
-          lastheader = header;
-        }
-        headerNests2 = headerNests;
-
-        //create latches
-        BasicBlock* lastLatch = nullptr;
-        std::map<BasicBlock*, BasicBlock*> header2latch;
-        for(int i=loopCnt-1; i>=0; --i){
-          auto header = headerNests.top();
-          auto latch = BasicBlock::Create(kernelBB->getContext(), "latch." + std::to_string(i), F, kernelBB);
-          if(!lastLatch)
-            lastLatch = latch;
-          auto br = BranchInst::Create(header, latch);
-
-          header2latch[header] = latch;
-          headerNests.pop();
-        }
-
-
-        //create header branches
-        auto loopExit = kernelBB->getSingleSuccessor();
-        assert(loopExit && "kernel BB has multiple exits\n");
-
-        BasicBlock *prevHeader = nullptr;
-        int i = loopCnt-1;
         std::vector<Value*> indvars;
-        while(!headerNests2.empty()){
-          auto header = headerNests2.top();
-          headerNests2.pop();
-          auto nextHeader = headerNests2.empty()? nullptr : headerNests2.top();
+        auto loopDims = kernelProfile->loopDims;
+        if(kernelProfile->gridLoopCnt + kernelProfile->blockLoopCnt != 0){
+          std::stack<BasicBlock*> headerNests, headerNests2;
+          auto kernelBB = kernelProfile->kernelBB;
+          BasicBlock* pred = kernelBB->getSinglePredecessor();
+          std::vector<BasicBlock*> succs(succ_begin(kernelBB), succ_end(kernelBB));
+          auto term = dyn_cast<BranchInst>(pred->getTerminator());
+          assert(term && "mergeKernel: term is not a branch inst 206\n");
+          auto kernelPred = kernelBB->getSinglePredecessor();
+          assert(kernelPred && "mergeKernel: kernel has multiple predecessors\n");
+          insts2Remove.push_back(term);
+          Value *cond = nullptr;
+          if(term->isConditional())
+            cond = term->getCondition();
+          int loopCnt = 0;
+          BasicBlock *lastheader = nullptr;
 
-          //create phi node
-          Type *phiTy = header2itNum[header]->getType();
-          auto indvar = PHINode::Create(phiTy, 2, "indvar."+std::to_string(i), header);
-          indvars.push_back(indvar);
-          CmpInst *cmp = CmpInst::Create(Instruction::ICmp, CmpInst::ICMP_ULT, indvar, header2itNum[header], "exitCheck." + std::to_string(i), header);
-          BranchInst *term = nullptr;
-
-          //create increment in latch
-          auto latch = header2latch[header];
-          Value *incr = BinaryOperator::Create(Instruction::Add, indvar, ConstantInt::get(phiTy, 1),
-                                    "indvar.next." + std::to_string(i), latch->getTerminator());
-
-          //TODO: figure out why i need getName empty
-
-          //a single loop
-          if(!nextHeader && !prevHeader){
-            term = BranchInst::Create(kernelBB, loopExit, cmp, header);
-            indvar->addIncoming(ConstantInt::get(phiTy,0), kernelPred);
-          }
-          else if(!nextHeader || !nextHeader->hasName() || nextHeader->getName() == ""){
-            term = BranchInst::Create(prevHeader, loopExit, cmp, header);
-            indvar->addIncoming(ConstantInt::get(phiTy,0), kernelPred);
-          }
-          else if(!prevHeader){
-            term = BranchInst::Create(kernelBB, header2latch[nextHeader], cmp, header);
-            indvar->addIncoming(ConstantInt::get(phiTy,0), nextHeader);
-          }
-          else{
-            term = BranchInst::Create(prevHeader, header2latch[nextHeader], cmp, header);
-            indvar->addIncoming(ConstantInt::get(phiTy,0), nextHeader);
-          }
-
-          if(kernelProfile->dim2classify[header2itNum[header]] == 1 ||
-              kernelProfile->dim2classify[header2itNum[header]] == 2){
-            LLVMContext& C = term->getContext();
-            MDNode* N = MDNode::get(C, MDString::get(C, ""));
-            if(kernelProfile->dim2classify[header2itNum[header]] == 1){
-              if(kernelProfile->gridLoopCnt > 1) term->setMetadata("tulip.doall.loop.grid.collapse", N);
-              else term->setMetadata("tulip.doall.loop.grid", N);
+          //create headers
+          std::map<BasicBlock*, Value*>header2itNum;
+          for(auto itNum : loopDims){
+            if(ConstantInt *constInt = dyn_cast<ConstantInt>(itNum))
+              if(constInt->getSExtValue() == 1)
+                continue;
+            auto header = BasicBlock::Create(kernelBB->getContext(), "header." + std::to_string(loopCnt), F, kernelBB);
+            headerNests.push(header);
+            header2itNum[header] = itNum;
+            if(loopCnt == 0){
+              auto br = BranchInst::Create(header, pred);
+            //  LLVMContext& C = term->getContext();
+            //  MDNode* N = MDNode::get(C, MDString::get(C, ""));
+            //  term->setMetadata("splendid.doall.loop", N);
             }
-            if(kernelProfile->dim2classify[header2itNum[header]] == 2){
-              if(kernelProfile->blockLoopCnt > 1) term->setMetadata("tulip.doall.loop.block.collapse", N);
-              else term->setMetadata("tulip.doall.loop.block", N);
-            }
-            errs() << "mergeKernel: create metadata" << *term << "\n";
+            pred = header;
+            loopCnt++;
+            lastheader = header;
           }
-          indvar->addIncoming(incr, header2latch[header]);
-          prevHeader = header;
-          i--;
+          headerNests2 = headerNests;
+
+          //create latches
+          BasicBlock* lastLatch = nullptr;
+          std::map<BasicBlock*, BasicBlock*> header2latch;
+          for(int i=loopCnt-1; i>=0; --i){
+            auto header = headerNests.top();
+            auto latch = BasicBlock::Create(kernelBB->getContext(), "latch." + std::to_string(i), F, kernelBB);
+            if(!lastLatch)
+              lastLatch = latch;
+            auto br = BranchInst::Create(header, latch);
+
+            header2latch[header] = latch;
+            headerNests.pop();
+          }
+
+
+          //create header branches
+          auto loopExit = kernelBB->getSingleSuccessor();
+          assert(loopExit && "kernel BB has multiple exits\n");
+
+          BasicBlock *prevHeader = nullptr;
+          int i = loopCnt-1;
+          while(!headerNests2.empty()){
+            auto header = headerNests2.top();
+            headerNests2.pop();
+            auto nextHeader = headerNests2.empty()? nullptr : headerNests2.top();
+
+            //create phi node
+            Type *phiTy = header2itNum[header]->getType();
+            auto indvar = PHINode::Create(phiTy, 2, "indvar."+std::to_string(i), header);
+            indvars.push_back(indvar);
+            CmpInst *cmp = CmpInst::Create(Instruction::ICmp, CmpInst::ICMP_ULT, indvar, header2itNum[header], "exitCheck." + std::to_string(i), header);
+            BranchInst *term = nullptr;
+
+            //create increment in latch
+            auto latch = header2latch[header];
+            Value *incr = BinaryOperator::Create(Instruction::Add, indvar, ConstantInt::get(phiTy, 1),
+                                      "indvar.next." + std::to_string(i), latch->getTerminator());
+
+            //TODO: figure out why i need getName empty
+
+            //a single loop
+            if(!nextHeader && !prevHeader){
+              term = BranchInst::Create(kernelBB, loopExit, cmp, header);
+              indvar->addIncoming(ConstantInt::get(phiTy,0), kernelPred);
+            }
+            else if(!nextHeader || !nextHeader->hasName() || nextHeader->getName() == ""){
+              term = BranchInst::Create(prevHeader, loopExit, cmp, header);
+              indvar->addIncoming(ConstantInt::get(phiTy,0), kernelPred);
+            }
+            else if(!prevHeader){
+              term = BranchInst::Create(kernelBB, header2latch[nextHeader], cmp, header);
+              indvar->addIncoming(ConstantInt::get(phiTy,0), nextHeader);
+            }
+            else{
+              term = BranchInst::Create(prevHeader, header2latch[nextHeader], cmp, header);
+              indvar->addIncoming(ConstantInt::get(phiTy,0), nextHeader);
+            }
+
+            if(kernelProfile->dim2classify[header2itNum[header]] == 1 ||
+                kernelProfile->dim2classify[header2itNum[header]] == 2){
+              LLVMContext& C = term->getContext();
+              MDNode* N = MDNode::get(C, MDString::get(C, ""));
+              if(kernelProfile->dim2classify[header2itNum[header]] == 1){
+                if(kernelProfile->gridLoopCnt > 1) term->setMetadata("tulip.doall.loop.grid.collapse", N);
+                else term->setMetadata("tulip.doall.loop.grid", N);
+              }
+              if(kernelProfile->dim2classify[header2itNum[header]] == 2){
+                if(kernelProfile->blockLoopCnt > 1) term->setMetadata("tulip.doall.loop.block.collapse", N);
+                else term->setMetadata("tulip.doall.loop.block", N);
+              }
+              errs() << "mergeKernel: create metadata" << *term << "\n";
+            }
+            indvar->addIncoming(incr, header2latch[header]);
+            prevHeader = header;
+            i--;
+          }
+
+          //replace kernel branch
+          insts2Remove.push_back(kernelBB->getTerminator());
+          BranchInst::Create(lastLatch, kernelBB);
         }
-
-        //replace kernel branch
-        insts2Remove.push_back(kernelBB->getTerminator());
-        BranchInst::Create(lastLatch, kernelBB);
-
 
 
         std::vector<Value*> newKernelArgs;
@@ -792,7 +817,8 @@ struct MergeKernel : public ModulePass {
           newKernelArgs.push_back(kernelCall->getArgOperand(i));
         }
         std::reverse(indvars.begin(), indvars.end());
-        std::vector<Value*> indvarsExtended; i=0;
+        std::vector<Value*> indvarsExtended;
+        int i=0;
         auto i32Ty = Type::getInt32Ty(kernelCall->getContext());
         if(loopDims.size() == 2){
           //push dims

@@ -191,6 +191,30 @@ struct MergeKernel : public ModulePass {
             funcs2delete.insert(calledFunc);
             insts2Remove.push_back(CI);
           }
+          else if (calledFunc->getName().contains("llvm.nvvm.fmax")){
+            errs() << "mergeKernel: found nvvm fmax declaration\n";
+            auto sqrtFuncTy = calledFunc->getFunctionType();
+            Function *F = Function::Create(sqrtFuncTy, Function::ExternalLinkage, "fmax", M);
+            CallSite CS(CI);
+            SmallVector<Value *, 4> args(CS.arg_begin(), CS.arg_end());
+            auto sqrtFunc = F->getParent()->getOrInsertFunction("fmax", sqrtFuncTy);
+            auto sqrtCall = CallInst::Create(
+                  sqrtFunc,
+                  args,
+                  "",
+                  CI
+                );
+            for(User *U : CI->users()){
+              Instruction *inst = dyn_cast<Instruction>(U);
+              if(!inst) continue;
+              for (auto OI = inst->op_begin(), OE = inst->op_end(); OI != OE; ++OI){
+                Value *val = *OI;
+                if(val == CI)
+                  *OI = sqrtCall;
+              }
+            }
+            insts2Remove.push_back(CI);
+          }
           else if (calledFunc->getName().contains("llvm.nvvm.sqrt")){
             errs() << "mergeKernel: found nvvm sqrt declaration\n";
             auto sqrtFuncTy = calledFunc->getFunctionType();

@@ -17,6 +17,7 @@
 #include "llvm/Transforms/Utils/ValueMapper.h"
 #include "llvm/Transforms/Utils/Cloning.h"
 #include "llvm/IR/Operator.h"
+#include "llvm/IR/DebugInfoMetadata.h"
 
 using namespace llvm;
 
@@ -37,6 +38,7 @@ struct MergeKernel : public ModulePass {
   static char ID;
   std::set<Function*>funcs2delete;
   std::map<Function*, Function*> device2newFunc;
+  std::map<Function*, Function*> host2newFunc;
   int mdID = 0;
   MergeKernel() : ModulePass(ID) {}
 
@@ -177,6 +179,7 @@ struct MergeKernel : public ModulePass {
 
   bool runOnModule(Module &M) override {
     //transform target
+    std::vector<Instruction*> insts2Remove_delayed;
     for (Module::iterator FI = M.begin(), FE = M.end(); FI != FE; ++FI) {
       std::map<CallInst*, KernelProfile*> kernelProfiles;
       Function *F = &*FI;
@@ -411,6 +414,7 @@ struct MergeKernel : public ModulePass {
                 );
             newFunc = kernelProfiles[CI]->newFunc;
             device2newFunc[deviceKernel] = newFunc;
+            host2newFunc[hostKernel] = newFunc;
             deviceKernel->setSubprogram(nullptr);
 
             //copy old kernel over to the new
@@ -909,7 +913,7 @@ struct MergeKernel : public ModulePass {
               "",
               kernelCall //insert before
             );
-          insts2Remove.push_back(kernelCall);
+          insts2Remove_delayed.push_back(kernelCall);
       }
 
        //delete cuda calls and control flows
@@ -917,6 +921,27 @@ struct MergeKernel : public ModulePass {
          I->eraseFromParent();
 
     }
+    //change function name
+    for (Module::iterator FI = M.begin(), FE = M.end(); FI != FE; ++FI) {
+      Function *F = &*FI;
+      // Skip over declarations; only look at definitions
+      if (F->isDeclaration()) continue;
+
+      // Check if this function has associated debug info
+      if (DISubprogram* subprog = F->getSubprogram()) {
+          // You have the DISubprogram; let's print some info for demonstration
+          StringRef functionName = F->getName();
+          std::string subprogramName = subprog->getName().str();
+          errs() << "Function: " << functionName << ", Subprogram: " << subprogramName << "\n";
+          F->setName(subprogramName);
+          if(host2newFunc.find(F) != host2newFunc.end())
+            host2newFunc[F]->setName(subprogramName);
+      }
+    }
+
+    //delete cuda calls and control flows
+    for(auto I : insts2Remove_delayed)
+      I->eraseFromParent();
 
     //delete functions
     for(auto f : funcs2delete)

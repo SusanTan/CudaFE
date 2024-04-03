@@ -18,6 +18,7 @@
 #include "llvm/Transforms/Utils/Cloning.h"
 #include "llvm/IR/Operator.h"
 #include "llvm/IR/DebugInfoMetadata.h"
+#include "llvm/IR/IRBuilder.h"
 
 using namespace llvm;
 
@@ -607,7 +608,48 @@ struct MergeKernel : public ModulePass {
                       mdSize = MDNode::get(C, MDString::get(C, std::to_string(mdID)));
                       sizeInst->setMetadata("tulip.target.datasize", mdSize);
                       mdID++;
+
+                      if(!mode->isOne()){
+                        //isolate sizeInst:
+                        FunctionCallee isolatedFunc = F->getParent()->getOrInsertFunction(
+                                      "isolateDatasize"+std::to_string(mdID),
+                                      FunctionType::get(
+                                          Type::getInt64Ty(F->getContext()),
+                                          {Type::getInt32Ty(F->getContext())},
+                                          false
+                                          )
+                                      );
+                        if (Function *func = dyn_cast<Function>(isolatedFunc.getCallee())) {
+                          func->addFnAttr(Attribute::NoInline);
+                          func->addFnAttr(Attribute::OptimizeNone);
+                        }
+
+
+                        // Create a new function for each instruction (simplified for this example).
+                        std::vector<Type*> paramTypes = {sizeInst->getOperand(0)->getType()};
+                        FunctionType *funcType = FunctionType::get(sizeInst->getType(), paramTypes, false);
+                        Function *newFunc = Function::Create(funcType, Function::InternalLinkage, "datasize.isolated", M);
+                        newFunc->addFnAttr(Attribute::NoInline);
+                        newFunc->addFnAttr(Attribute::OptimizeNone);
+
+                        BasicBlock *entry = BasicBlock::Create(F->getContext(), "entry", newFunc);
+                        IRBuilder<> builder(entry);
+                        Argument *arg = &*newFunc->arg_begin();
+                        arg->setName("arg");
+                        // Assume the instruction is a binary operation like 'add' for simplicity.
+                        Value *newInst = builder.CreateSExt(arg, Type::getInt64Ty(F->getContext()), "sext");
+                        builder.CreateRet(newInst);
+
+                        // Replace the original instruction with a call to the new function.
+                        IRBuilder<> caller(sizeInst);
+                        CallInst *call = caller.CreateCall(newFunc, {sizeInst->getOperand(0)}, "C_SIZE");
+                        call->setMetadata("tulip.target.datasize", mdSize);
+                        sizeInst->replaceAllUsesWith(call);
+                        sizeInst->eraseFromParent();
+                      }
                     }
+
+
                     MDNode* N;
                     mdSize ? N = MDNode::get(C, mdSize) :
                              N = MDNode::get(C, ValueAsMetadata::get(dyn_cast<ConstantInt>(cpySize)));

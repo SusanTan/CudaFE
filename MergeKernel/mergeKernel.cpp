@@ -933,7 +933,6 @@ struct MergeKernel : public ModulePass {
           StringRef functionName = F->getName();
           std::string subprogramName = subprog->getName().str();
           errs() << "Function: " << functionName << ", Subprogram: " << subprogramName << "\n";
-          F->setName(subprogramName);
           if(host2newFunc.find(F) != host2newFunc.end())
             host2newFunc[F]->setName(subprogramName);
       }

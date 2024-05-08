@@ -180,6 +180,7 @@ struct MergeKernel : public ModulePass {
     for (Module::iterator FI = M.begin(), FE = M.end(); FI != FE; ++FI) {
       std::map<CallInst*, KernelProfile*> kernelProfiles;
       Function *F = &*FI;
+      if(F->isDeclaration()) continue;
       if(F->hasFnAttribute("target-features"))
         F->removeFnAttr("target-features");
       if(F->hasFnAttribute("target-cpu"))

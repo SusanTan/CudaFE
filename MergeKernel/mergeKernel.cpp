@@ -180,8 +180,10 @@ struct MergeKernel : public ModulePass {
     for (Module::iterator FI = M.begin(), FE = M.end(); FI != FE; ++FI) {
       std::map<CallInst*, KernelProfile*> kernelProfiles;
       Function *F = &*FI;
-      F->removeFnAttr("target-features");
-      F->removeFnAttr("target-cpu");
+      if(F->hasFnAttribute("target-features"))
+        F->removeFnAttr("target-features");
+      if(F->hasFnAttribute("target-cpu"))
+        F->removeFnAttr("target-cpu");
       BasicBlock *kernelBB = nullptr;
       std::vector<Instruction*> insts2Remove;
       for (inst_iterator I = inst_begin(F), E = inst_end(F); I != E; ++I) {
